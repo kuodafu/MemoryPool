@@ -30,14 +30,44 @@
 #define ID_ALLOCATOR2           1002    // 分配两个成员
 #define ID_FREE                 1003    // 释放一个成员
 
+class CAllocator : public std::allocator<BYTE>
+{
+    using _Ty = BYTE;
+public:
+
+    void deallocate(_Ty* const _Ptr, const size_t _Count) {
+        _STL_ASSERT(_Ptr != nullptr || _Count == 0, "null pointer cannot point to a block of non-zero size");
+        if (_Ptr)
+            VirtualFree(_Ptr, 0, MEM_RELEASE);
+
+    }
+
+    __declspec(allocator) _Ty* allocate(_CRT_GUARDOVERFLOW const size_t _Count) {
+        static_assert(sizeof(value_type) > 0, "value_type must be complete before calling allocate.");
+
+        LPBYTE pStart = (LPBYTE)0x50000;
+        for (int i = 0; i < 100; i++)
+        {
+            // 演示用, 就不管对齐的问题了
+            if (void* const block = VirtualAlloc(pStart, _Count, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))
+            {
+                return reinterpret_cast<_Ty*>(block);
+            }
+            pStart += 0x10000;
+        }
+        throw std::bad_alloc();
+        return 0;
+    }
+
+};
 
 typedef int value_type;
-static kuodafu::CMemoryObjectPool<value_type> pool;
-static kuodafu::CMemoryPoolView<value_type> pool_view;
+static kuodafu::CMemoryObjectPool<value_type, CAllocator> pool;
+static kuodafu::CMemoryPoolView<value_type, CAllocator> pool_view;
 const int m_headSize = sizeof(kuodafu::MEMORY_HEAD);
 const int m_itemSize = sizeof(int);
 const int m_count = 10;
-
+static HFONT m_hFont;
 struct ITEM_VALUE
 {
     value_type* pAddr;  // 记录内存池分配到的成员地址
@@ -148,12 +178,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     {
     case WM_CREATE:
     {
+        LOGFONTW lf = { 0 };
+        SystemParametersInfoW(SPI_GETICONTITLELOGFONT, sizeof(lf), &lf, 0);
+        lf.lfHeight = -16;
+        lf.lfCharSet = GB2312_CHARSET;
+        memcpy(lf.lfFaceName, L"宋体", 6);
+        m_hFont = CreateFontIndirectW(&lf);
+
         auto pfn_create = [hWnd](int x, int y, int cx, int cy, int id, LPCWSTR pszTitle)
         {
-            HFONT hFont = GetStockFont(DEFAULT_GUI_FONT);
             const int style = WS_CLIPSIBLINGS | WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON;
             HWND hChild = CreateWindowExW(0, WC_BUTTONW, pszTitle, style, x, y, cx, cy, hWnd, (HMENU)(ULONG_PTR)id, 0, 0);
-            SendMessageW(hChild, WM_SETFONT, (WPARAM)hFont, 0);
+            SendMessageW(hChild, WM_SETFONT, (WPARAM)m_hFont, 0);
             return hChild;
         };
 
@@ -187,21 +223,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 auto pHead = pool_view.GetHead();
                 LPBYTE pFirst = 0;
-                if (pHead->arr == 0)
+                if (pHead->item == 0)
                 {
                     // arr里已经没有内存可以分配了, 从回收的链表里分配
-                    if (pHead->pFree == 0)
+                    kuodafu::PLIST_NODE pNextNode = 0;
+                    const int node_count = pool_view.GetNodeCount(pHead, pHead->list, pNextNode);
+                    if (node_count < count)
                     {
                         // 链表里也没有了, 这里就不申请了, 实际的内存池就是分开另一块更大的内存块, 然后重复操作
                         MessageBoxW(hWnd, L"内存池已经不够分配了, 需要分配另一块更大的内存块", L"这里就不演示了", 0);
                         return;
                     }
 
-                    pFirst = (LPBYTE)pHead->pFree;
+                    pFirst = (LPBYTE)pHead->list;
                 }
                 else
                 {
-                    pFirst = (LPBYTE)pHead->arr;
+                    pFirst = (LPBYTE)pHead->item;
                 }
 
                 const int index = pool_view.PointerToIndex(pHead, pFirst);
@@ -331,8 +369,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             throw;
         SelectObject(hdcMem, hBitmap);
         SetBkMode(hdcMem, TRANSPARENT);
-        HFONT hFont = GetStockFont(DEFAULT_GUI_FONT);
-        SelectObject(hdcMem, hFont);
+        SelectObject(hdcMem, m_hFont);
 
         COLORREF clrBk = RGB(255, 255, 255);
         COLORREF clrText = RGB(0, 0, 0);
@@ -411,7 +448,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
 
     int top = 50;
     int left = offset_left + 30;
-    int width = 100;
+    int width = 120;
     int height = width;
     RECT rcBlock = { left, top, left + 60, top + height };
     COLORREF clrBlock = RGB(222, 255, 222);     // 待分配颜色
@@ -425,20 +462,20 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
     RECT rcBorder{ left, top, left + m_count * width + 60, top + height };
     Rectangle(hdc, rcBorder.left, rcBorder.top, rcBorder.right, rcBorder.bottom);
 
-    LPBYTE pFreeList = (LPBYTE)pHead->pFree;
+    LPBYTE pFreeList = (LPBYTE)pHead->list;
     kuodafu::PLIST_NODE pNextNode = 0;
-    const int first_node_count = pool_view.GetNodeCount(pHead, pHead->pFree, pNextNode);
-    const int first_node_index = pHead->pFree ? pool_view.PointerToIndex(pHead, pHead->pFree) : -1;
-    const int first_arr_index = pHead->arr ? pool_view.PointerToIndex(pHead, pHead->arr) : 0x7fffffff;
+    const int first_node_count = pool_view.GetNodeCount(pHead, pHead->list, pNextNode);
+    const int first_node_index = pHead->list ? pool_view.PointerToIndex(pHead, pHead->list) : -1;
+    const int first_arr_index = pHead->item ? pool_view.PointerToIndex(pHead, pHead->item) : 0x7fffffff;
 
-    auto pfn_draw_head = [&rcBlock, hdc, pHead]()
+    auto pfn_draw_head = [&rcBlock, hdc, pHead, cxClient]()
     {
         int mid = rcBlock.left + (rcBlock.right - rcBlock.left) / 2;
         MoveToEx(hdc, mid, rcBlock.bottom, 0);
         LineTo(hdc, mid, rcBlock.bottom + 400);
         LineTo(hdc, mid + 50, rcBlock.bottom + 400);
-        const int height = 110;
-        const int width = 340;
+        const int height = 170;
+        const int width = 450;
 
         RECT rc;
         rc.left = mid + 50;
@@ -459,8 +496,8 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         szSize[10] = L'\0';
 
         LPCWSTR fmt =
-            L"内存块结构信息:\r\n\r\n"
-            L"this : 0x%p    本结构的地址\r\n"
+            L"内存块结构信息: 结构占用尺寸%d字节\r\n"
+            L"this : 0x%p    内存块的起始地址\r\n\r\n"
             L"next : 0x%p    下一个内存块地址\r\n"
             L"size : %s    内存块结构 + %d个成员占用的尺寸\r\n"
             L"pFree: 0x%p    回收回来的内存\r\n"
@@ -469,19 +506,19 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
 
 
         wchar_t szText[1024] = { 0 };
-        swprintf_s(szText, fmt, pHead, pHead->next, szSize, m_count, pHead->pFree, pHead->arr);
+        swprintf_s(szText, fmt, m_headSize, pHead, pHead->next, szSize, m_count, pHead->list, pHead->item);
         DrawTextW(hdc, szText, -1, &rc, DT_LEFT);
 
-        if (pHead->pFree == 0)
+        if (pHead->list == 0)
             return;
         
         std::wstring str;
         str.reserve(100);
         str.assign(L"pFree链表每个节点的信息\r\n\r\n");
-        auto node = pHead->pFree;
+        auto node = pHead->list;
+        int i = 0;
         while (node)
         {
-
             kuodafu::PLIST_NODE pNextNode = 0;
 
             const int count = pool_view.GetNodeCount(pHead, node, pNextNode);
@@ -489,7 +526,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             LPBYTE pNodeEnd = pNodeStart + (m_itemSize * count);
 
             wchar_t sz[128] = { 0 };
-            swprintf_s(sz, L"0x%p - 0x%p, 占用 %d 个成员, 下一个节点 = 0x%p\r\n", pNodeStart, pNodeEnd, count, pNextNode);
+            swprintf_s(sz, L"%d: 0x%p - 0x%p, 占用 %d 个成员, 下一个节点 = 0x%p\r\n", i++, pNodeStart, pNodeEnd, count, pNextNode);
             str.append(sz);
 
             node = pNextNode;
@@ -497,7 +534,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
 
         OffsetRect(&rc, width, 0);
         rc.bottom += 80;
-        rc.right += 100;
+        rc.right = cxClient;
         DrawTextW(hdc, str.c_str(), (int)str.size(), &rc, DT_LEFT);
 
     };
@@ -541,7 +578,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         pool_view.GetItemStartEnd(pHead, pItemStart, pItemEnd);
         LPBYTE pItem = pItemStart + i * m_itemSize;
 
-        kuodafu::PLIST_NODE pFree = pHead->pFree;
+        kuodafu::PLIST_NODE pFree = pHead->list;
         kuodafu::PLIST_NODE pNext = 0;
         kuodafu::PLIST_NODE node = pFree;
         int node_index = -1;
@@ -559,8 +596,8 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             }
             node = pNext;
         }
-        const int height = 75;
-        const int width = 220;
+        const int height = 105;
+        const int width = 260;
         if (i > node_index && i < node_index + node_count)
         {
             RECT old = rcBlock;
@@ -581,15 +618,15 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
 
         wchar_t szText[100];
         swprintf_s(szText, fmt, first_node_count, pNext);
-        pfn_draw_remark(width, height, 100, szText);
+        pfn_draw_remark(width, height, 80, szText);
     };
     // 绘画点击的项目
     auto pfn_draw_click = [&]()
     {
-        kuodafu::PLIST_NODE pFree = pHead->pFree;
+        kuodafu::PLIST_NODE pFree = pHead->list;
         kuodafu::PLIST_NODE pNext = 0;
-        const int height = 75;
-        const int width = 220;
+        const int height = 90;
+        const int width = 260;
 
         LPBYTE pItemStart = 0, pItemEnd = 0;
         pool_view.GetItemStartEnd(pHead, pItemStart, pItemEnd);
@@ -608,7 +645,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             (isAlloc ? L"已分配" : L"未分配"),
             (isFreeList ? L"当前节点是已经被回收的地址\r\n" : L"")
             );
-        pfn_draw_remark(width, height, 190, szText);
+        pfn_draw_remark(width, height, 200, szText);
     };
     auto pfn_draw_block = [&](int i, bool isDraw)
     {
@@ -631,13 +668,13 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             return;
         }
 
-        const int height = 50;
-        const int width = 220;
+        const int height = 60;
+        const int width = 280;
         LPCWSTR pszText =
             L"这个节点就是下一个分配出去的地址\r\n"
             L"内存池优先从这里开始分配\r\n"
             ;
-        pfn_draw_remark(width, height, 40, pszText);
+        pfn_draw_remark(width, height, 10, pszText);
 
     };
 
@@ -659,7 +696,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         m_rcBlock[i] = rcBlock;
         hbr = isFreeList ? hbrFreeList : (isAlloc ? hbrAllocated : hbrBlock);
 
-        const int isDraw = pAddr == pHead->arr;
+        const int isDraw = pAddr == pHead->item;
 
         draw_block(hdc, rcBlock, sz, hbr, pfn_draw_block, i, isDraw);
 
