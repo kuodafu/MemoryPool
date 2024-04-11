@@ -29,17 +29,16 @@ template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>
 #endif
 class CMemoryObjectPool
 {
-#if CMEMORYPOOL_ISDEBUG
-    using _Alloc = std::allocator<BYTE>;
-#endif
-
 private:
-
-
     using value_type    = _Ty;
     using pointer       = _Ty*;
     using const_pointer = const _Ty*;
+#if CMEMORYPOOL_ISDEBUG
+    using _Alloc = std::allocator<BYTE>;
+    friend class CMemoryPoolView;
+#else
     friend class CMemoryPoolView<value_type, _Alloc>;
+#endif
 
 
     _Alloc              _Al;        // 分配器, 分配内存都是按字节分配, 自己计算分配成员需要多少字节 + 头部结构
@@ -632,8 +631,11 @@ template<class _Ty, class _Alloc>
 class CMemoryPoolView
 {
     using value_type = _Ty;
+#if CMEMORYPOOL_ISDEBUG
+    using MEMPOOL = CMemoryObjectPool;
+#else
     using MEMPOOL = CMemoryObjectPool<value_type, _Alloc>;
-
+#endif
     MEMPOOL* pool;
 public:
 
@@ -684,15 +686,15 @@ public:
     // 判断传入的地址是否是开始和结束里并且是对齐成员的地址, 返回成员所以, 不是成员地址就返回-1
     int IsItemAddress(LPCVOID ptr, LPBYTE begin, LPBYTE end)
     {
-        int index = 0;
-        while (begin < end)
-        {
-            if (begin == (LPBYTE)ptr)
-                return index;
-            index++;
-            begin += sizeof(value_type);
-        }
-        return -1;
+        LPBYTE p = (LPBYTE)ptr;
+        if (p < begin || p >= end)
+            return -1;
+
+        const int offset = p - begin;
+        if (offset % sizeof(value_type) != 0)
+            return -1;
+
+        return offset / sizeof(value_type);
     };
 
     // 检测传入的地址是否是回收链表里的地址
@@ -717,7 +719,7 @@ public:
     }
 
     // 传递一个地址, 判断这个地址是否是内存池里的地址, 并且被分配出去, 如果传入的不是内存池的地址就触发0xcc断点
-    int IsAllocatord(PMEMORY_HEAD pHead, LPCVOID ptr)
+    int IsAllocated(PMEMORY_HEAD pHead, LPCVOID ptr)
     {
         // 调用一次判断这个地址是否合法, 如果不合法, 这个函数会断下
         // 这个类本身就不是为了效率, 而是为了绝对的准确, 所以这里调用一次判断地址是否合法

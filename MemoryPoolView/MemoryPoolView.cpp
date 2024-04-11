@@ -62,8 +62,14 @@ public:
 };
 
 typedef int value_type;
+#if CMEMORYPOOL_ISDEBUG
+static kuodafu::CMemoryObjectPool pool;
+static kuodafu::CMemoryPoolView pool_view;
+#else
 static kuodafu::CMemoryObjectPool<value_type, CAllocator> pool;
 static kuodafu::CMemoryPoolView<value_type, CAllocator> pool_view;
+#endif
+
 const int m_headSize = sizeof(kuodafu::MEMORY_HEAD);
 const int m_itemSize = sizeof(int);
 const int m_count = 10;
@@ -632,7 +638,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         pool_view.GetItemStartEnd(pHead, pItemStart, pItemEnd);
         LPBYTE pItem = pItemStart + m_index * m_itemSize;
 
-        const bool isAlloc = pool_view.IsAllocatord(pHead, pItem);
+        const bool isAlloc = pool_view.IsAllocated(pHead, pItem);
         const bool isFreeList = pool_view.IsFreeList(pHead, pItem);
 
         LPCWSTR fmt =
@@ -689,7 +695,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             break;
         wchar_t sz[32];
         LPBYTE pAddr = pItemStart + i * m_itemSize;
-        bool isAlloc = pool_view.IsAllocatord(pHead, pAddr);
+        bool isAlloc = pool_view.IsAllocated(pHead, pAddr);
         const bool isFreeList = pool_view.IsFreeList(pHead, pAddr);
 
         swprintf_s(sz, L"0x%p", pAddr);
