@@ -230,18 +230,17 @@ public:
         {
             // 被释放的这个数组是连着下一个分配的内存, 直接把下一个分配的内存指向回收的这个数组
             pHead->item = pArrStart;
-            pRet = alloc_for_item(pHead, _Size, false);
-            if (pRet)
-                return pRet;    // 还够存放, 那就只调整指向位置, 不拷贝内存
             isFree = false;     // pHead->arr = pArrStart; 这一行已经释放了, 把变量设置为假, 后面不需要继续释放
+
         }
 
-        // 走到这里就是需要重新分配一块数组, 然后拷贝原来的数据到新的内存里
-        if (isFree)
-        {
-            // 先尝试从当前内存块里分配, 如果分配失败就从所有内存块里分配
-            pRet = alloc_for_item(pHead, _Size, false);
-        }
+        // 先尝试从当前内存块里分配, 如果分配失败就从所有内存块里分配
+        pRet = alloc_for_item(pHead, _Size, false);
+        if(pRet && !isFree)
+            return pRet;    // 如果这一个内存块分配成功, 并且isFree为false, 那就是在原来数组的地址上分配成功了
+        
+        if (!pRet && pHead->list)
+            alloc_for_list(pHead, _Size, false);    // 从item分配失败后就尝试从回收的链表里分配
 
         if (!pRet)
             pRet = malloc_arr(_Size, false);
@@ -377,7 +376,7 @@ private:
         {
             // next不为0, 那就是要么存成员数, 要么存下一个节点指针
             // pArr[0] == pHead->pFree->next, 这两个是一样的
-            LPINT* pArr = reinterpret_cast<LPINT*>(node);
+            pointer* pArr = reinterpret_cast<pointer*>(node);
             if (is_head(pHead, node->next))
             {
                 pNextNode = node->next; // next存放的是下一个节点地址
@@ -485,8 +484,8 @@ private:
 
         pHead->next     = 0;
         pHead->size     = newSize;
-        pHead->item      = pStart + sizeof(MEMORY_HEAD);
-        pHead->list    = 0;
+        pHead->item     = pStart + sizeof(MEMORY_HEAD);
+        pHead->list     = 0;
         return pHead;
     }
 

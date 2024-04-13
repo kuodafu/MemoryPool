@@ -1,5 +1,5 @@
 #pragma once
-#define CMEMORYPOOL_ISDEBUG 1
+#define CMEMORYPOOL_ISDEBUG 0
 
 #define NAMESPACE_MEMORYPOOL_BEGIN  namespace kuodafu {
 #define NAMESPACE_MEMORYPOOL_END    }
