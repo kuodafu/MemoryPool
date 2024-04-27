@@ -217,7 +217,7 @@ public:
         PMEMORY_HEAD pHead = get_head(pArr);
         if (!pHead)
         {
-            throw std::exception(__FUNCTION__ ": 传递进来了不是内存池里的地址", 0);
+            throw std::exception(__FUNCTION__ ": 传递进来了不是内存池里的地址", 1);
             return 0;
         }
 
@@ -262,7 +262,7 @@ public:
         PMEMORY_HEAD pHead = get_head(p);
         if (!pHead)
         {
-            throw std::exception(__FUNCTION__ ": 传递进来了不是内存池里的地址", 0);
+            throw std::exception(__FUNCTION__ ": 传递进来了不是内存池里的地址", 1);
             return false;
         }
 
@@ -539,7 +539,7 @@ private:
             // 不连续, 但是本次回收的不止一个成员
             pArr = reinterpret_cast<pointer*>(pFirstNode);
             pArr[0] = reinterpret_cast<pointer>(_FreeCount);        // 第一个成员指向成员数
-            pArr[1] = reinterpret_cast<pointer>(pHead->list);      // 第二个成员指向下一个节点
+            pArr[1] = reinterpret_cast<pointer>(pHead->list);       // 第二个成员指向下一个节点
             pHead->list = pFirstNode;          // 首节点指向本次回收的内存
             return;
         }
@@ -587,21 +587,20 @@ private:
 
         LPBYTE pNodeStart2 = reinterpret_cast<LPBYTE>(pNode2);
         LPBYTE pNodeEnd2 = pNodeStart2 + (sizeof(value_type) * count2);
+        pNextNode = pNext2;
 
         if(pNodeStart1 == pNodeEnd2)
         {
-            // 节点2的结束地址是节点1的开始地址, 那就是 节点2连着节点1
+            // 节点2的结束地址是节点1的开始地址, 那就是 节点1连着节点2
             // 首节点指向节点2, 下一个节点就是节点2的下一个节点
             // 因为第一个节点指向的就是第二个节点, 所以下一个节点永远的第二个节点指向的下一个节点
             pFirstNode = pNode2;
-            pNextNode = pNext2;
         }
         else if (pNodeEnd1 == pNodeStart2)
         {
-            // 节点1的结束地址是节点2的开始地址, 那就是 节点1连着节点2
+            // 节点1的结束地址是节点2的开始地址, 那就是 节点2连着节点1
             // 首节点还是节点1
             pFirstNode = pHead->list;
-            pNextNode = pNext2;
         }
         else
         {

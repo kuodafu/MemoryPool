@@ -506,8 +506,8 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
             L"this : 0x%p    内存块的起始地址\r\n\r\n"
             L"next : 0x%p    下一个内存块地址\r\n"
             L"size : %s    内存块结构 + %d个成员占用的尺寸\r\n"
-            L"pFree: 0x%p    回收回来的内存\r\n"
-            L"arr  : 0x%p    下一个分配的内存地址"
+            L"list : 0x%p    回收回来的内存\r\n"
+            L"item : 0x%p    下一个分配的内存地址"
             ;
 
 
