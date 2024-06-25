@@ -12,7 +12,7 @@ CMemoryObjectPool pool_obj;
 CMemoryPool pool;
 #else
 CMemoryObjectPool<int> pool_obj;
-CMemoryPool<> pool;
+CMemoryPool pool;
 #endif
 int* test()
 {
@@ -28,6 +28,7 @@ int main()
     const int alloc_size = 10;
     auto s = GetTickCount64();
 
+    auto asdsdf  = realloc(0, 123);
     pool_obj.init(alloc_size);
 
 

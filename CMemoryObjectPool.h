@@ -29,10 +29,11 @@ template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>
 #endif
 class CMemoryObjectPool
 {
-private:
+public:
     using value_type    = _Ty;
     using pointer       = _Ty*;
     using const_pointer = const _Ty*;
+private:
 #if CMEMORYPOOL_ISDEBUG
     using _Alloc = std::allocator<BYTE>;
     friend class CMemoryPoolView;
@@ -66,7 +67,6 @@ public:
         other._Mem = 0;
         other._Now = 0;
     }
-
     ~CMemoryObjectPool()
     {
         Release();
@@ -115,6 +115,20 @@ public:
         return true;
     }
 
+    inline void swap(CMemoryObjectPool& other)
+    {
+        _Alloc&& _Al = std::move(other._Al);
+        PMEMORY_HEAD _Mem = other._Mem;
+        PMEMORY_HEAD _Now = other._Now;
+
+        other._Mem = this->_Mem;
+        other._Now = this->_Now;
+        other._Al = std::move(this->_Al);
+
+        this->_Mem = _Mem;
+        this->_Now = _Now;
+        this->_Al = std::move(_Al);
+    }
     // 申请一个成员, 申请失败则抛出 std::bad_alloc 类型异常
     inline pointer malloc(bool isClear = false)
     {
@@ -289,7 +303,7 @@ public:
     }
 
     // 查询地址是否是内存池里的地址
-    inline bool query(_Ty* p) const
+    inline bool query(pointer p) const
     {
         return get_head(p) != nullptr;
     }
