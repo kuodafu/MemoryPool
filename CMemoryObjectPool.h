@@ -10,7 +10,7 @@ typedef struct MEMORY_HEAD
 {
     MEMORY_HEAD*    next;       // 下一个块分配的内存
     size_t          size;       // 这一块内存占用的字节
-    PLIST_NODE      list;       // 回收回来的内存, 如果都没有回收, 那整个值就是0, 数组也分配完了就需要开辟新的内存块
+    PLIST_NODE      list;       // 回收回来的内存, 如果都没有回收, 那这个值就是0, 数组也分配完了就需要开辟新的内存块
     LPBYTE          item;       // 分配出去的内存, 每次分配出去都指向下一个成员, 直到越界后就从链表中取下一个节点
 }*PMEMORY_HEAD;
 
@@ -23,7 +23,7 @@ template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>> class CMemoryP
 
 // 定长内存池, 每次分配都是固定大小的内存
 #if CMEMORYPOOL_ISDEBUG
-typedef int _Ty;
+typedef size_t _Ty;
 #else
 template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>
 #endif
@@ -47,25 +47,25 @@ private:
     PMEMORY_HEAD        _Now;       // 当前操作的内存块
 
 public:
-    CMemoryObjectPool() :_Mem(0), _Al(), _Now(0)
+    CMemoryObjectPool() :_Mem(nullptr), _Al(), _Now(nullptr)
     {
 
     }
-    explicit CMemoryObjectPool(size_t size) :_Mem(0), _Al(), _Now(0)
+    explicit CMemoryObjectPool(size_t size) :_Mem(nullptr), _Al(), _Now(nullptr)
     {
         init(size);
     }
     CMemoryObjectPool(const CMemoryObjectPool& other) = delete;
     CMemoryObjectPool& operator=(const CMemoryObjectPool& other) = delete;
 
-    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept :_Mem(0), _Al(), _Now(0)
+    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept :_Mem(nullptr), _Al(), _Now(nullptr)
     {
         _Al = std::move(other._Al);
         _Mem = other._Mem;
         _Now = other._Now;
 
-        other._Mem = 0;
-        other._Now = 0;
+        other._Mem = nullptr;
+        other._Now = nullptr;
     }
     ~CMemoryObjectPool()
     {
@@ -80,8 +80,8 @@ public:
             _Al.deallocate(reinterpret_cast<LPBYTE>(node), node->size);
             node = next;
         }
-        _Mem = 0;
-        _Now = 0;
+        _Mem = nullptr;
+        _Now = nullptr;
     }
     // 清空已经申请的内存, 不会释放, 已经分配出去的内存都不再可用
     // 清空后下次从头开始分配内存
@@ -98,12 +98,26 @@ public:
         {
             // arr指向第一个分配出去的内存, 重置为初始状态
             pHead->item = reinterpret_cast<LPBYTE>(pHead) + sizeof(MEMORY_HEAD);
-            pHead->list = 0;   // 没有回收的内存
+            pHead->list = nullptr;  // 没有回收的内存
 
             pHead = pHead->next;
         }
     }
 public:
+
+    // 返回当前内存池总共占用的字节数, 包括已经分配和没分配的
+    inline size_t size() const
+    {
+        size_t size = 0;
+        PMEMORY_HEAD pMemNode = _Mem;
+        while (pMemNode)
+        {
+            size += pMemNode->size;
+            pMemNode = pMemNode->next;
+        }
+        return size;
+    }
+
     // 初始化内存池, 内部会申请空间
     inline bool init(size_t size = 0x1000)
     {
@@ -139,7 +153,7 @@ public:
     // 申请一个数组, 释放内存请使用 free_arr() 释放, 否则只会释放第一个成员
     // 申请失败则抛出 std::bad_alloc 类型异常
     // _Size = 申请多少个成员
-    inline pointer malloc_arr(int _Size, bool isClear = false)
+    inline pointer malloc_arr(size_t _Size, bool isClear = false)
     {
         if (_Size < 0 || _Size > 0x7fffffff)
             _Size = 1;
@@ -156,15 +170,14 @@ public:
 
         auto pfn_ret = [isClear, _Size, &pRet, this](PMEMORY_HEAD pHead) -> bool
         {
-            // 先从数组里分配, 如果数组分配完了, 就从链表里分配
-            if (pHead->item)
-                pRet = alloc_for_item(pHead, _Size, isClear);
-            
-            // 没有值, 那就是没有空闲的内存, 从回收的内存中取
-            if (!pRet && pHead->list)
+            // 先从回收链表里分配, 如果分配失败就从所有内存块里分配
+            // 先消耗链表, 不要让链表深度太深, 否则会导致链表遍历时间过长
+            if (pHead->list)
                 pRet = alloc_for_list(pHead, _Size, isClear);
-            
 
+            // 再从item里分配
+            if (!pRet && pHead->item)
+                pRet = alloc_for_item(pHead, _Size, isClear);
 
             return pRet != 0;
         };
@@ -248,13 +261,14 @@ public:
 
         }
 
-        // 先尝试从当前内存块里分配, 如果分配失败就从所有内存块里分配
-        pRet = alloc_for_item(pHead, _Size, false);
-        if(pRet && !isFree)
+        // 先尝试从回收链表里分配, 如果分配失败就从所有内存块里分配
+        // 先消耗链表, 不要让链表深度太深, 否则会导致链表遍历时间过长
+        pRet = alloc_for_list(pHead, _Size, false);
+        if (pRet && !isFree)
             return pRet;    // 如果这一个内存块分配成功, 并且isFree为false, 那就是在原来数组的地址上分配成功了
-        
+
         if (!pRet && pHead->list)
-            alloc_for_list(pHead, _Size, false);    // 从item分配失败后就尝试从回收的链表里分配
+            pRet = alloc_for_item(pHead, _Size, false);    // 从链表分配失败后就尝试从item里分配
 
         if (!pRet)
             pRet = malloc_arr(_Size, false);
@@ -354,10 +368,10 @@ private:
                 return pMemNode;
             pMemNode = next;
         }
-        return 0;
+        return nullptr;
     }
     // 从内存块的数组里分配成员出去
-    inline pointer alloc_for_item(PMEMORY_HEAD pHead, int _Size, bool isClear) const
+    inline pointer alloc_for_item(PMEMORY_HEAD pHead, size_t _Size, bool isClear) const
     {
         LPBYTE pEnd = reinterpret_cast<LPBYTE>(pHead) + pHead->size;
         LPBYTE ptr = pHead->item;
@@ -377,13 +391,13 @@ private:
     }
 
     // 获取指定节点占用几个成员, 节点为空则返回0, 不为空最少返回1, 返回大于1表示是多个成员
-    int get_node_count(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode) const
+    size_t get_node_count(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode) const
     {
-        pNextNode = 0;
+        pNextNode = nullptr;
         if (!node)
             return 0;
 
-        int count = 1;  // 走到这里表示回收链表里有节点, 那返回的成员数最少为1
+        size_t count = 1;  // 走到这里表示回收链表里有节点, 那返回的成员数最少为1
 
         // 回收链表首节点的下一个节点不为0, 那就表示next要么存着成员数, 要么存着下一个节点地址
         if (node->next != 0)
@@ -398,7 +412,7 @@ private:
             else
             {
                 // next存放的是成员数
-                count = reinterpret_cast<int>(pArr[0]);
+                count = reinterpret_cast<size_t>(pArr[0]);
                 pNextNode = reinterpret_cast<PLIST_NODE>(pArr[1]);
             }
         }
@@ -408,12 +422,12 @@ private:
     // 获取回收链表首个节点的属性, 返回0表示没有下一个节点
     // 如果返回1表示首个节点存放的是下一个节点的地址
     // 返回大于1表示首节点存放的是一个数组, 返回成员数
-    inline int get_first_node_count(PMEMORY_HEAD pHead, PLIST_NODE& pNextNode) const
+    inline size_t get_first_node_count(PMEMORY_HEAD pHead, PLIST_NODE& pNextNode) const
     {
         return get_node_count(pHead, pHead->list, pNextNode);
     }
     // 从内存块的链表节点里分配成员出去, 能走到这个方法的话, 回收的链表肯定不为空
-    inline pointer alloc_for_list(PMEMORY_HEAD pHead, int _Size, bool isClear)
+    inline pointer alloc_for_list(PMEMORY_HEAD pHead, size_t _Size, bool isClear)
     {
         LPBYTE pStart = reinterpret_cast<LPBYTE>(pHead) + sizeof(MEMORY_HEAD);
         LPBYTE pEnd = pStart + pHead->size - sizeof(MEMORY_HEAD);
@@ -424,7 +438,7 @@ private:
             return 0;
 
         PLIST_NODE pNextNode = 0;
-        int count = get_first_node_count(pHead, pNextNode);
+        size_t count = get_first_node_count(pHead, pNextNode);
 
         if (_Size == 1 && count == 1)
         {
@@ -510,7 +524,7 @@ private:
     // pFreeStart = 释放的内存开始地址
     // pFreeEnd = 释放的内存结束地址
     // _FreeCount = 释放的内存成员数
-    inline void combine_free_pointer(PMEMORY_HEAD pHead, LPBYTE pFreeStart, LPBYTE pFreeEnd, int _FreeCount)
+    inline void combine_free_pointer(PMEMORY_HEAD pHead, LPBYTE pFreeStart, LPBYTE pFreeEnd, size_t _FreeCount)
     {
         // 分配的这个数组中间有分配出去了数据, 回收到链表里
         // 回收的时候看看第一个节点和当前回收的内存是不是连续的, 回收连续节点/节点连续回收, 连续就当成数组保存
@@ -531,8 +545,8 @@ private:
 
         // 首个节点是否是内存块里的地址, 如果不是, 那就表示是这个节点有多少个成员是连续的
         pointer* pArr = reinterpret_cast<pointer*>(pHead->list);
-        PLIST_NODE pNextNode = 0;
-        int count = get_first_node_count(pHead, pNextNode);
+        PLIST_NODE pNextNode = nullptr;
+        size_t count = get_first_node_count(pHead, pNextNode);
         
         // 释放链表中节点是首尾地址, 需要判断回收的内存是不是和这个地址是连续的
         LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(pHead->list);
@@ -574,7 +588,7 @@ private:
         // 走到这里就是回收的内存和链表里的是连续的
         // 不连续的上面已经处理返回了
 
-        const int newCount = _FreeCount + count;
+        const size_t newCount = _FreeCount + count;
 
         pArr = reinterpret_cast<pointer*>(pFirstNode);
         pArr[0] = reinterpret_cast<pointer>(newCount);      // 第一个成员指向成员数
@@ -592,9 +606,9 @@ private:
         if (!pNode2)
             return; // 第二个节点是空节点, 不需要合并
 
-        PLIST_NODE pNext1 = 0, pNext2 = 0, pFirstNode = 0, pNextNode = 0;
-        int count1 = get_node_count(pHead, pHead->list, pNext1);
-        int count2 = get_node_count(pHead, pNode2, pNext2);
+        PLIST_NODE pNext1 = nullptr, pNext2 = nullptr, pFirstNode = nullptr, pNextNode = nullptr;
+        size_t count1 = get_node_count(pHead, pHead->list, pNext1);
+        size_t count2 = get_node_count(pHead, pNode2, pNext2);
 
         LPBYTE pNodeStart1 = reinterpret_cast<LPBYTE>(pHead->list);
         LPBYTE pNodeEnd1 = pNodeStart1 + (sizeof(value_type) * count1);
@@ -621,7 +635,7 @@ private:
             // 两个节点的地址并不连续, 不需要合并
             return;
         }
-        const int newCount = count1 + count2;
+        const size_t newCount = count1 + count2;
 
         pointer* pArr = reinterpret_cast<pointer*>(pFirstNode);
         pArr[0] = reinterpret_cast<pointer>(newCount);      // 第一个成员指向成员数
@@ -672,7 +686,7 @@ public:
     // 获取指定节点占用几个成员, 节点为空则返回0, 不为空最少返回1, 返回大于1表示是多个成员
     int GetNodeCount(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode)
     {
-        return pool->get_node_count(pHead, node, pNextNode);
+        return (int)pool->get_node_count(pHead, node, pNextNode);
     }
     // 获取起始分配内存的起始地址和结束地址, 返回有多少个成员
     int GetItemStartEnd(PMEMORY_HEAD pHead, LPBYTE& pStart, LPBYTE& pEnd)
@@ -680,7 +694,7 @@ public:
         pStart = (LPBYTE)pHead;
         pEnd = pStart + pHead->size;
         pStart = pStart + sizeof(MEMORY_HEAD);
-        return (pEnd - pStart) / sizeof(value_type);
+        return (int)((pEnd - pStart) / sizeof(value_type));
     }
     // 传递一个地址, 确认这个地址是内存池里第几个成员, 不是指定成员就触发0xcc断点
     int PointerToIndex(PMEMORY_HEAD pHead, LPCVOID ptr)
@@ -702,11 +716,11 @@ public:
         if (p < begin || p >= end)
             return -1;
 
-        const int offset = p - begin;
+        const size_t offset = p - begin;
         if (offset % sizeof(value_type) != 0)
             return -1;
 
-        return offset / sizeof(value_type);
+        return (int)(offset / sizeof(value_type));
     };
 
     // 检测传入的地址是否是回收链表里的地址

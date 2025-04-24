@@ -8,7 +8,7 @@
 NAMESPACE_MEMORYPOOL_BEGIN
 
 #if CMEMORYPOOL_ISDEBUG
-typedef int _Ty;
+typedef size_t _Ty;
 #else
 template<class _Ty = LPVOID, class _Alloc = std::allocator<_Ty>>
 #endif
