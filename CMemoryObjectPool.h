@@ -10,7 +10,7 @@ typedef struct MEMORY_HEAD
 {
     MEMORY_HEAD*    next;       // 下一个块分配的内存
     size_t          size;       // 这一块内存占用的字节
-    PLIST_NODE      list;       // 回收回来的内存, 如果都没有回收, 那整个值就是0, 数组也分配完了就需要开辟新的内存块
+    PLIST_NODE      list;       // 回收回来的内存, 如果都没有回收, 那这个值就是0, 数组也分配完了就需要开辟新的内存块
     LPBYTE          item;       // 分配出去的内存, 每次分配出去都指向下一个成员, 直到越界后就从链表中取下一个节点
 }*PMEMORY_HEAD;
 
@@ -23,7 +23,7 @@ template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>> class CMemoryP
 
 // 定长内存池, 每次分配都是固定大小的内存
 #if CMEMORYPOOL_ISDEBUG
-typedef int _Ty;
+typedef size_t _Ty;
 #else
 template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>
 #endif
@@ -47,30 +47,31 @@ private:
     PMEMORY_HEAD        _Now;       // 当前操作的内存块
 
 public:
-    CMemoryObjectPool() :_Mem(0), _Al(), _Now(0)
+    CMemoryObjectPool() :_Mem(nullptr), _Al(), _Now(nullptr)
     {
 
     }
-    explicit CMemoryObjectPool(size_t size) :_Mem(0), _Al(), _Now(0)
+    explicit CMemoryObjectPool(size_t size) :_Mem(nullptr), _Al(), _Now(nullptr)
     {
         init(size);
     }
     CMemoryObjectPool(const CMemoryObjectPool& other) = delete;
     CMemoryObjectPool& operator=(const CMemoryObjectPool& other) = delete;
 
-    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept :_Mem(0), _Al(), _Now(0)
+    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept :_Mem(nullptr), _Al(), _Now(nullptr)
     {
         _Al = std::move(other._Al);
         _Mem = other._Mem;
         _Now = other._Now;
 
-        other._Mem = 0;
-        other._Now = 0;
+        other._Mem = nullptr;
+        other._Now = nullptr;
     }
     ~CMemoryObjectPool()
     {
         Release();
     }
+
     inline void Release()
     {
         PMEMORY_HEAD node = _Mem;
@@ -80,8 +81,8 @@ public:
             _Al.deallocate(reinterpret_cast<LPBYTE>(node), node->size);
             node = next;
         }
-        _Mem = 0;
-        _Now = 0;
+        _Mem = nullptr;
+        _Now = nullptr;
     }
     // 清空已经申请的内存, 不会释放, 已经分配出去的内存都不再可用
     // 清空后下次从头开始分配内存
@@ -98,11 +99,25 @@ public:
         {
             // arr指向第一个分配出去的内存, 重置为初始状态
             pHead->item = reinterpret_cast<LPBYTE>(pHead) + sizeof(MEMORY_HEAD);
-            pHead->list = 0;   // 没有回收的内存
+            pHead->list = nullptr;   // 没有回收的内存
 
             pHead = pHead->next;
         }
     }
+
+    // 返回当前内存池总共占用的字节数, 包括已经分配和没分配的
+    inline size_t size() const
+    {
+        size_t size = 0;
+        PMEMORY_HEAD pMemNode = _Mem;
+        while (pMemNode)
+        {
+            size += pMemNode->size;
+            pMemNode = pMemNode->next;
+        }
+        return size;
+    }
+
 public:
     // 初始化内存池, 内部会申请空间
     inline bool init(size_t size = 0x1000)
@@ -139,7 +154,7 @@ public:
     // 申请一个数组, 释放内存请使用 free_arr() 释放, 否则只会释放第一个成员
     // 申请失败则抛出 std::bad_alloc 类型异常
     // _Size = 申请多少个成员
-    inline pointer malloc_arr(int _Size, bool isClear = false)
+    inline pointer malloc_arr(size_t _Size, bool isClear = false)
     {
         if (_Size < 0 || _Size > 0x7fffffff)
             _Size = 1;
@@ -156,17 +171,16 @@ public:
 
         auto pfn_ret = [isClear, _Size, &pRet, this](PMEMORY_HEAD pHead) -> bool
         {
-            // 先从数组里分配, 如果数组分配完了, 就从链表里分配
-            if (pHead->item)
+            // 先从回收链表里分配, 如果分配失败就从所有内存块里分配
+            // 先消耗链表, 不要让链表深度太深, 否则会导致链表遍历时间过长
+            if (pHead->list)
+                pRet = alloc_for_list(pHead, _Size, isClear, 0);
+
+            // 再从item里分配
+            if (!pRet && pHead->item)
                 pRet = alloc_for_item(pHead, _Size, isClear);
             
-            // 没有值, 那就是没有空闲的内存, 从回收的内存中取
-            if (!pRet && pHead->list)
-                pRet = alloc_for_list(pHead, _Size, isClear);
-            
-
-
-            return pRet != 0;
+            return pRet != nullptr;
         };
 
 
@@ -248,13 +262,14 @@ public:
 
         }
 
-        // 先尝试从当前内存块里分配, 如果分配失败就从所有内存块里分配
-        pRet = alloc_for_item(pHead, _Size, false);
+        // 先尝试从回收链表里分配, 如果分配失败就从所有内存块里分配
+        // 先消耗链表, 不要让链表深度太深, 否则会导致链表遍历时间过长
+        pRet = alloc_for_list(pHead, _Size, false, 0);
         if(pRet && !isFree)
             return pRet;    // 如果这一个内存块分配成功, 并且isFree为false, 那就是在原来数组的地址上分配成功了
         
         if (!pRet && pHead->list)
-            alloc_for_list(pHead, _Size, false);    // 从item分配失败后就尝试从回收的链表里分配
+            pRet = alloc_for_item(pHead, _Size, false);    // 从链表分配失败后就尝试从item里分配
 
         if (!pRet)
             pRet = malloc_arr(_Size, false);
@@ -296,6 +311,7 @@ public:
         _Now = pHead;
         return true;
     }
+
 
     inline bool free(pointer p)
     {
@@ -354,10 +370,10 @@ private:
                 return pMemNode;
             pMemNode = next;
         }
-        return 0;
+        return nullptr;
     }
     // 从内存块的数组里分配成员出去
-    inline pointer alloc_for_item(PMEMORY_HEAD pHead, int _Size, bool isClear) const
+    inline pointer alloc_for_item(PMEMORY_HEAD pHead, size_t _Size, bool isClear) const
     {
         LPBYTE pEnd = reinterpret_cast<LPBYTE>(pHead) + pHead->size;
         LPBYTE ptr = pHead->item;
@@ -377,16 +393,16 @@ private:
     }
 
     // 获取指定节点占用几个成员, 节点为空则返回0, 不为空最少返回1, 返回大于1表示是多个成员
-    int get_node_count(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode) const
+    size_t node_get_count(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode) const
     {
-        pNextNode = 0;
+        pNextNode = nullptr;
         if (!node)
             return 0;
 
-        int count = 1;  // 走到这里表示回收链表里有节点, 那返回的成员数最少为1
+        size_t count = 1;  // 走到这里表示回收链表里有节点, 那返回的成员数最少为1
 
         // 回收链表首节点的下一个节点不为0, 那就表示next要么存着成员数, 要么存着下一个节点地址
-        if (node->next != 0)
+        if (node->next != nullptr)
         {
             // next不为0, 那就是要么存成员数, 要么存下一个节点指针
             // pArr[0] == pHead->pFree->next, 这两个是一样的
@@ -398,94 +414,164 @@ private:
             else
             {
                 // next存放的是成员数
-                count = reinterpret_cast<int>(pArr[0]);
+                count = reinterpret_cast<size_t>(pArr[0]);
                 pNextNode = reinterpret_cast<PLIST_NODE>(pArr[1]);
             }
         }
         return count;
     }
 
-    // 获取回收链表首个节点的属性, 返回0表示没有下一个节点
-    // 如果返回1表示首个节点存放的是下一个节点的地址
-    // 返回大于1表示首节点存放的是一个数组, 返回成员数
-    inline int get_first_node_count(PMEMORY_HEAD pHead, PLIST_NODE& pNextNode) const
+    struct NODE_MIN_COUNT
     {
-        return get_node_count(pHead, pHead->list, pNextNode);
-    }
+        size_t count;       // 返回的节点占用的成员数
+        PLIST_NODE node;    // 返回的节点
+        PLIST_NODE next;    // 返回节点的下一个节点
+        PLIST_NODE prev;    // 返回节点的上一个节点
+    };
+
     // 从内存块的链表节点里分配成员出去, 能走到这个方法的话, 回收的链表肯定不为空
-    inline pointer alloc_for_list(PMEMORY_HEAD pHead, int _Size, bool isClear)
+    // 先遍历回收链表, 看看哪个节点刚好够分出去, 取成员最小最接近的节点分配出去
+    inline pointer alloc_for_list(PMEMORY_HEAD pHead, size_t _Size, bool isClear, size_t stack)
     {
-        LPBYTE pStart = reinterpret_cast<LPBYTE>(pHead) + sizeof(MEMORY_HEAD);
-        LPBYTE pEnd = pStart + pHead->size - sizeof(MEMORY_HEAD);
 
-        // 首个节点是否是内存块里的地址, 如果不是, 那就表示是这个节点有多少个成员是连续的
-        pointer* pArr = reinterpret_cast<pointer*>(pHead->list);
-        if (!pArr)
-            return 0;
+        NODE_MIN_COUNT min_node{};
+        if (!list_get_min_node(pHead, _Size, min_node))
+            return nullptr; // 整个链表没有节点足够分配
 
-        PLIST_NODE pNextNode = 0;
-        int count = get_first_node_count(pHead, pNextNode);
-
-        if (_Size == 1 && count == 1)
+        // node 就是要分配出去的内存, count 是node 占用的成员数
+        if (min_node.count == _Size)
         {
-            // 只分配一个成员, 并且首个节点不是成员数, 那就直接把这个节点分配出去, 然后指向下一个节点
-            PLIST_NODE pNode = pHead->list; // 把头节点分配出去
-            pHead->list = pNode->next;      // 头节点指向下一个节点
-            if (isClear)
-                memset(pNode, 0, sizeof(value_type));
-            return reinterpret_cast<pointer>(pNode);
+            // 要返回的节点刚好足够分配出去, 直接返回
+            node_set_next(pHead, min_node.prev, min_node.next);
+            return reinterpret_cast<pointer>(min_node.node);
         }
 
-        if (count == 1)
-        {
-            //TODO 走到这里就是要分配多个成员, 但是回收的链表首个成员不是成员数, 这里是否有必要遍历链表分配
-            return 0;
-        }
+        // 走到这就是节点可用成员大于要分配出去的成员
+        // 调整当前节点, 然后分配出去
 
-        // 走到这里就是首个节点是成员数, 并且本次要分配多个成员, 检测是否足够分配
-
-        if (_Size > count)
-            return 0;   // 回收的链表成员数不够分配, 返回0, 还是看设计, 是遍历链表找分配还是不管
-
-        // 走到这里就是回收的链表成员数足够分配, 分配出去, 然后修改成员数
-
-
-
-        if (_Size == count)
-        {
-            // 节点的成员数等于分配出去的成员数, 那就直接分配出去, 然后链表首节点指向下一个节点
-            pHead->list = pNextNode;
-            if (isClear)
-                memset(pArr, 0, sizeof(value_type) * _Size);
-            return reinterpret_cast<pointer>(pArr);
-        }
-
-        // 走到这里就是分配的成员数小于链表成员数, 需要把链表成员数减去分配的成员数, 然后把分配的成员数返回
-        LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(pHead->list);
+        LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(min_node.node);
         LPBYTE pNodeEnd = pNodeStart + (sizeof(value_type) * _Size);
+        auto _List = reinterpret_cast<PLIST_NODE>(pNodeEnd);
 
-        // 回收链表的首节点指向分配出去后的下一个成员地址
-        pHead->list = reinterpret_cast<PLIST_NODE>(pNodeEnd);
+        size_t new_count = min_node.count - _Size;
 
-        if (_Size + 1 == count)
+        // 分配出去后当前节点就只剩下一个成员
+        if (new_count == 1)
         {
             // 分配出去后节点就剩下一个成员, 那就这个成员指向下一个节点
-            pHead->list->next = pNextNode; // 只剩一个成员了, 那就指向下一个节点
+            _List->next = min_node.next;    // 只剩一个成员了, 那就指向下一个节点
         }
         else
         {
             // 走到这就是剩余1个成员以上, 那就第一个成员记录剩余成员数, 第二个成员指向下一个节点
+            auto pArr = reinterpret_cast<pointer*>(_List);
 
-            pArr = reinterpret_cast<pointer*>(pNodeEnd);
-            pArr[0] = reinterpret_cast<pointer>(count - _Size); // 第一个成员记录剩余成员数
-            pArr[1] = reinterpret_cast<pointer>(pNextNode);     // 第二个成员指向下一个节点
+            pArr[0] = reinterpret_cast<pointer>(new_count);     // 第一个成员记录剩余成员数
+            pArr[1] = reinterpret_cast<pointer>(min_node.next); // 第二个成员指向下一个节点
         }
+
+        // 让上一个节点指向 _List
+        node_set_next(pHead, min_node.prev, _List);
 
         if (isClear)
             memset(pNodeStart, 0, sizeof(value_type) * _Size);
         return reinterpret_cast<pointer>(pNodeStart);
     }
 
+    // 获取节点里和要分配的成员数最接近的节点, 并返回节点的成员数
+    // pHead = 内存块
+    // _Size = 要分配的成员数
+    // ret_node = 接收返回的内容
+    inline bool list_get_min_node(PMEMORY_HEAD pHead, size_t _Size, NODE_MIN_COUNT& ret_node)
+    {
+        ret_node = { 0 };
+
+        size_t _Count = 0;
+        PLIST_NODE prev = nullptr;
+        PLIST_NODE node = pHead->list;
+        while (node)
+        {
+            _Count++;
+            PLIST_NODE next = nullptr;
+            size_t node_count = node_get_count(pHead, node, next);
+
+            // 如果当前节点够分配, 那就先记录起来
+            if (node_count >= _Size)
+            {
+                // 当前节点够分配, 把最小的成员记录起来, 要是循环结束都没有找到合适的节点, 那就返回这个节点
+                if (ret_node.count == 0 || node_count < ret_node.count)
+                {
+                    // 先把这个节点保存起来, 如果有下一个更合适的会被覆盖
+                    ret_node.node = node;
+                    ret_node.count = node_count;
+                    ret_node.next = next;
+                    ret_node.prev = prev;
+                }
+            }
+
+            // 当前节点和需要分配的成员刚好一样, 不需要往下找了, 直接返回
+            if (node_count == _Size)
+                break;
+
+            // 继续下一轮循环, 节点不够分配的情况不需要处理, 直接下一轮循环就可以
+
+            prev = node;    // 记录上一个节点, 第一次循环的时候上一个节点为空
+            node = next;    // 指向下一个节点, 继续循环
+        }
+
+        // 只要 ret_node.node 有赋过值, 那就表示肯定有合适的节点返回
+        return ret_node.node != nullptr;
+    }
+
+    // 获取链表里和传递进来的地址相连的节点, 首尾/ 尾首 都算相连
+    // pHead = 内存块
+    // pStart = 要判断的起始地址
+    // pEnd = 要判断的结束地址
+    int node_get_memory_adjacent(PMEMORY_HEAD pHead, LPBYTE pStart, LPBYTE pEnd, NODE_MIN_COUNT& ret_node)
+    {
+        size_t _Count = 0;
+        PLIST_NODE prev = nullptr;
+        PLIST_NODE node = pHead->list;
+        ret_node = { 0 };
+        while (node)
+        {
+            _Count++;
+
+            PLIST_NODE next = nullptr;
+            size_t node_count = node_get_count(pHead, node, next);
+
+            LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(node);
+            LPBYTE pNodeEnd = pNodeStart + (sizeof(value_type) * node_count);
+
+            int adjacent = is_memory_adjacent(pStart, pEnd, pNodeStart, pNodeEnd);
+            if (adjacent)
+            {
+                ret_node.count = node_count;
+                ret_node.node = node;
+                ret_node.next = next;
+                ret_node.prev = prev;
+                return adjacent;
+            }
+
+            prev = node;
+            node = next;
+        }
+        return 0;
+    }
+
+    // 判断两个首尾地址是否是相连的, 1连着2 返回1, 2连着1 返回-1, 不相连返回0
+    int is_memory_adjacent(LPBYTE pStart1, LPBYTE pEnd1, LPBYTE pStart2, LPBYTE pEnd2)
+    {
+        // 如果第一个尾地址和第二个首地址一样, 就表示 1 连着 2
+        if (pEnd1 == pStart2)
+            return 1;
+        
+        // 如果第二个尾地址和第一个首地址一样, 就表示 2 连着 1
+        if (pEnd2 == pStart1)
+            return -1;
+
+        return 0;
+    }
     // 分配一块内存, 参数是需要分配多少个成员
     inline PMEMORY_HEAD malloc_head(size_t count)
     {
@@ -496,24 +582,24 @@ private:
 
         PMEMORY_HEAD pHead = reinterpret_cast<PMEMORY_HEAD>(pStart);
 
-        pHead->next     = 0;
+        pHead->next     = nullptr;
         pHead->size     = newSize;
         pHead->item     = pStart + sizeof(MEMORY_HEAD);
-        pHead->list     = 0;
+        pHead->list     = nullptr;
         return pHead;
     }
 
 
-
-    // 把释放的地址合并到链表里, 如果是连续的内存, 就合并成一个内存块, 如果不是连续, 就串成链表
+    // TODO 把释放的地址放到链表里, 链表是有序的, 每次加入都得遍历加入位置, 如果能合并到节点就合并
+    // 这个释放会影响速度, 但是这个只能存放一个指针的空间, 除了链表不知道有什么数据结构能用
     // pHead = 内存块头结构
     // pFreeStart = 释放的内存开始地址
     // pFreeEnd = 释放的内存结束地址
     // _FreeCount = 释放的内存成员数
-    inline void combine_free_pointer(PMEMORY_HEAD pHead, LPBYTE pFreeStart, LPBYTE pFreeEnd, int _FreeCount)
+    inline bool combine_free_pointer(PMEMORY_HEAD pHead, LPBYTE pFreeStart, LPBYTE pFreeEnd, size_t _FreeCount)
     {
         // 分配的这个数组中间有分配出去了数据, 回收到链表里
-        // 回收的时候看看第一个节点和当前回收的内存是不是连续的, 回收连续节点/节点连续回收, 连续就当成数组保存
+        // 回收的时候看看节点和当前回收的内存是不是连续的, 回收连续节点/节点连续回收, 连续就当成数组保存
         // 现在回收到链表里有两种模式
         // 1. 第一个不是内存块里的地址, 那就是成员数, 表示这个成员包括后面的成员有多少个是连续的, 最后一个成员指向下一个节点
         // 2. 第一个成员是内存块里的地址, 那就是指向下一个节点
@@ -525,84 +611,174 @@ private:
         {
             // 回收的是整块内存, 还原到初始状态
             pHead->item = pItemStart;
-            pHead->list = 0;
-            return;
+            pHead->list = nullptr;
+            return true;
         }
 
-        // 首个节点是否是内存块里的地址, 如果不是, 那就表示是这个节点有多少个成员是连续的
-        pointer* pArr = reinterpret_cast<pointer*>(pHead->list);
-        PLIST_NODE pNextNode = 0;
-        int count = get_first_node_count(pHead, pNextNode);
-        
-        // 释放链表中节点是首尾地址, 需要判断回收的内存是不是和这个地址是连续的
-        LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(pHead->list);
-        LPBYTE pNodeEnd = pNodeStart + (sizeof(value_type) * count);
-
-        // 如果 释放的结束地址不等于链表的开始地址, 并且 释放的开始地址不等于链表的结束地址
-        // 那就是不连续的内存, 直接把回收的内存放到链表里
-        if (pFreeEnd != pNodeStart && pFreeStart != pNodeEnd)
+        //////////////////////////////////////////////////////////////////////////
+        // 遍历链表, 找到加入的位置, 加入链表是从小到大排序的, 所以找到第一个比当前节点大的节点, 就插入到当前节点的后面
+        PLIST_NODE prev = nullptr;
+        PLIST_NODE node = pHead->list;
+        while (node)
         {
-            // 走到这里就是回收的内存像不是连续的, 那就把回收的内存放到链表里
-            PLIST_NODE pFirstNode = reinterpret_cast<PLIST_NODE>(pFreeStart);
-            if (_FreeCount == 1)
+            PLIST_NODE next = nullptr;
+            size_t node_count = node_get_count(pHead, node, next);
+
+            LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(node);
+            LPBYTE pNodeEnd = pNodeStart + (sizeof(value_type) * node_count);
+
+
+            int adjacent = is_memory_adjacent(pFreeStart, pFreeEnd, pNodeStart, pNodeEnd);
+            if (adjacent != 0)
             {
-                pFirstNode->next = pHead->list;    // 只释放一个成员, 那就放到链表首节点
-                pHead->list = pFirstNode;          // 首节点指向本次回收的内存
-                return;
+                // 回收的内存 连着 当前节点, 回收的内存在当前节点的左边, 调整当前节点的起始地址
+                if (adjacent > 0)
+                    pNodeStart = pFreeStart;
+                else
+                    pNodeEnd = pFreeEnd;
+
+                size_t newCount = (pNodeEnd - pNodeStart) / sizeof(value_type);
+                // 回收的内存和当前节点可用合并, 合并后更改一下节点数量, 然后就可以返回了
+                auto pArr = reinterpret_cast<pointer*>(pNodeStart);
+                pArr[0] = reinterpret_cast<pointer>(newCount);      // 第一个成员指向成员数
+                pArr[1] = reinterpret_cast<pointer>(next);          // 第二个成员指向下一个节点
+                return true;
             }
-            // 不连续, 但是本次回收的不止一个成员
-            pArr = reinterpret_cast<pointer*>(pFirstNode);
-            pArr[0] = reinterpret_cast<pointer>(_FreeCount);        // 第一个成员指向成员数
-            pArr[1] = reinterpret_cast<pointer>(pHead->list);       // 第二个成员指向下一个节点
-            pHead->list = pFirstNode;          // 首节点指向本次回收的内存
-            return;
+
+
+            // 回收的内存 和 当前节点 不连着, 判断是否是加入当前位置
+            if (pFreeStart > pNodeEnd)
+            {
+                // 回收的地址在当前节点的右边, 加入到节点的后面, 然后返回
+                PLIST_NODE free_node = node_make(pFreeStart, pFreeStart);
+                node_set_next(pHead, node, free_node);  // 当前节点的下一个节点就是回收发内存
+                node_set_next(pHead, free_node, next);  // 回收的内存的下一个节点就是当前节点的下一个节点
+                return true;
+            }
+            
+            // 继续往下走, 如果走出循环, 那就是要加入到链表尾部
+            prev = node;
+            node = next;
         }
 
-        PLIST_NODE pFirstNode = pHead->list;   // 首节点
-        if (pFreeEnd == pNodeStart)
+        PLIST_NODE free_node = node_make(pFreeStart, pFreeStart);
+        node_set_next(pHead, prev, free_node);  // 直接加入到链表尾部, 走出循环, prev就是最后一个节点
+        return true;
+    }
+
+    // 在一段内存之间生成一个节点
+    PLIST_NODE node_make(LPBYTE pStart, LPBYTE pEnd)
+    {
+        size_t count = (pEnd - pStart) / sizeof(value_type);
+        PLIST_NODE pNode = reinterpret_cast<PLIST_NODE>(pStart);
+        node_set_value(pNode, count, nullptr);
+        return pNode;
+    }
+
+    // 合并链表节点, 遍历整个链表, 把首节点和剩下的所有节点比较, 看看有没有相连的内存
+    void merge_nodes(PMEMORY_HEAD pHead)
+    {
+        return; // 废案
+        PLIST_NODE first_node = pHead->list;
+        PLIST_NODE first_next = nullptr;
+        size_t first_count = node_get_count(pHead, first_node, first_next);
+        LPBYTE pStart = reinterpret_cast<LPBYTE>(first_node);
+        LPBYTE pEnd = pStart + (sizeof(value_type) * first_count);
+
+        // 
+        size_t _Count = 0;
+        PLIST_NODE prev = first_node;
+        PLIST_NODE node = first_next;
+        while (node)
         {
-            // 回收的地址连着首节点, 那首节点就改成回收的地址
-            pFirstNode = reinterpret_cast<PLIST_NODE>(pFreeStart);
+            PLIST_NODE next = nullptr;
+            size_t node_count = node_get_count(pHead, node, next);
+
+            LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(node);
+            LPBYTE pNodeEnd = pNodeStart + (sizeof(value_type) * node_count);
+            int adjacent = is_memory_adjacent(pStart, pEnd, pNodeStart, pNodeEnd);
+
+            if (adjacent > 0)
+            {
+                // 第一个节点连着 当前枚举的节点, pEnd 改成 pNodeEnd
+                pEnd = pNodeEnd;
+            }
+            else if (adjacent < 0)
+            {
+                // 当前枚举的节点 连着 第一个节点
+                pStart = pNodeStart;
+            }
+            if (adjacent)
+            {
+                // 指针已经合并了, 这里合并节点
+
+                if (node == first_next)
+                {
+                    // 当前节点是第一个节点的下一个节点, 跟第一个节点合并了
+                    // 这里得把第一个节点的下一个节点更新一下
+                    first_next = next;
+                }
+                else
+                {
+                    // 不是第一个节点的下一个节点, 合并到当前节点
+                    // 先把当前节点断开链表, 让上一个节点指向下一个节点
+                    node_set_next(pHead, prev, next);
+                }
+
+                // 把当前节点断开链表, 让上一个节点指向下一个节点
+                node_set_next(pHead, prev, next);
+
+            }
+
+            prev = node;
+            node = next;
+            _Count++;
         }
-        else
+
+        size_t new_count = (pEnd - pStart) / sizeof(value_type);
+        node_set_value(first_node, new_count, nullptr);
+    }
+
+    // 遍历链表, 每遍历一个都调用回调函数去处理
+    // pHead = 内存块头结构
+    // _Pred = 回调函数(接收节点, 下一个节点, 上一个节点, 节点成员数, 节点序号), 返回0继续遍历, 返回非0终止遍历
+    template<typename _Pr>
+    void list_enum(PMEMORY_HEAD pHead, PLIST_NODE node, _Pr&& _Pred)
+    {
+        size_t _Count = 0;
+        PLIST_NODE prev = nullptr;
+        while (node)
         {
-            // 链表首节点连着回收的内存, 首节点还是链表的首节点, 需要修改成员数
+            PLIST_NODE next = nullptr;
+            size_t node_count = node_get_count(pHead, node, next);
 
+            if (_Pred(node, next, prev, node_count, _Count++))
+                break;
+
+            prev = node;
+            node = next;
         }
-
-
-        // 走到这里就是回收的内存和链表里的是连续的
-        // 不连续的上面已经处理返回了
-
-        const int newCount = _FreeCount + count;
-
-        pArr = reinterpret_cast<pointer*>(pFirstNode);
-        pArr[0] = reinterpret_cast<pointer>(newCount);      // 第一个成员指向成员数
-        pArr[1] = reinterpret_cast<pointer>(pNextNode);     // 第二个成员指向下一个节点
-        pHead->list = pFirstNode;          // 首节点指向本次回收的内存
-
-        // 合并两个节点的地址
-        combine_pointer(pHead, pNextNode);
 
     }
 
-    // 合并首节点和传入节点的地址, 如果两个节点的地址是连续的, 那就把这一块内存合并成一块
-    void combine_pointer(PMEMORY_HEAD pHead, PLIST_NODE pNode2)
+    // 递归合并传入的两个节点, 如果两个节点的地址是连续的, 那就把这一块内存合并成一块
+    void combine_node(PMEMORY_HEAD pHead, PLIST_NODE pNode1, PLIST_NODE pNode2)
     {
-        if (!pNode2)
-            return; // 第二个节点是空节点, 不需要合并
+        if (!pNode2 || !pNode1)
+            return; // 是空节点, 不需要合并
 
-        PLIST_NODE pNext1 = 0, pNext2 = 0, pFirstNode = 0, pNextNode = 0;
-        int count1 = get_node_count(pHead, pHead->list, pNext1);
-        int count2 = get_node_count(pHead, pNode2, pNext2);
+        PLIST_NODE pNext1 = nullptr, pNext2 = nullptr, pFirstNode = nullptr, pNextNode = nullptr;
+        const size_t count1 = node_get_count(pHead, pNode1, pNext1);
+        const size_t count2 = node_get_count(pHead, pNode2, pNext2);
 
-        LPBYTE pNodeStart1 = reinterpret_cast<LPBYTE>(pHead->list);
+        LPBYTE pNodeStart1 = reinterpret_cast<LPBYTE>(pNode1);
         LPBYTE pNodeEnd1 = pNodeStart1 + (sizeof(value_type) * count1);
 
         LPBYTE pNodeStart2 = reinterpret_cast<LPBYTE>(pNode2);
         LPBYTE pNodeEnd2 = pNodeStart2 + (sizeof(value_type) * count2);
         pNextNode = pNext2;
 
+        // 先判断节点2的结尾地址是否和节点1的起始地址相连, 相连就说明两个节点是连续的
         if(pNodeStart1 == pNodeEnd2)
         {
             // 节点2的结束地址是节点1的开始地址, 那就是 节点1连着节点2
@@ -610,34 +786,75 @@ private:
             // 因为第一个节点指向的就是第二个节点, 所以下一个节点永远的第二个节点指向的下一个节点
             pFirstNode = pNode2;
         }
+        // 再判断节点1的结尾地址是否和节点2的起始地址相连
         else if (pNodeEnd1 == pNodeStart2)
         {
             // 节点1的结束地址是节点2的开始地址, 那就是 节点2连着节点1
             // 首节点还是节点1
             pFirstNode = pHead->list;
         }
+        // 如果上面两个判断都不成立, 那就表示这两个节点不是连续的
         else
         {
             // 两个节点的地址并不连续, 不需要合并
             return;
         }
-        const int newCount = count1 + count2;
+        const size_t newCount = count1 + count2;
 
-        pointer* pArr = reinterpret_cast<pointer*>(pFirstNode);
-        pArr[0] = reinterpret_cast<pointer>(newCount);      // 第一个成员指向成员数
-        pArr[1] = reinterpret_cast<pointer>(pNextNode);     // 第二个成员指向下一个节点
+        node_set_value(pFirstNode, newCount, pNextNode);
+
         pHead->list = pFirstNode;          // 首节点指向本次回收的内存
 
         // 递归合并两个节点的地址
-        combine_pointer(pHead, pNextNode);
+        combine_node(pHead, pFirstNode, pNextNode);
 
     }
 
+    // 设置节点的下一个节点 pPrevNode->next = pNextNode, 会判断是按数组保存还是按下一个节点保存
+    // 如果上一个节点为空指针, 那就把下一个节点赋值给首节点
+    inline void node_set_next(PMEMORY_HEAD pHead, PLIST_NODE pPrevNode, PLIST_NODE pNextNode)
+    {
+        if (!pPrevNode)
+        {
+            pHead->list = pNextNode;
+            return;
+        }
+        // 需要判断上一个节点是存放一个指针还是多个成员
+        PLIST_NODE next = nullptr;
+        size_t count = node_get_count(pHead, pPrevNode, next);
+        node_set_value(pPrevNode, count, pNextNode);
+
+    }
+
+    // 设置节点信息
+    inline void node_set_value(PLIST_NODE node, size_t count, PLIST_NODE next)
+    {
+        if (count == 1)
+        {
+            node->next = next;
+        }
+        else
+        {
+            pointer* pArr = reinterpret_cast<pointer*>(node);
+            pArr[0] = reinterpret_cast<pointer>(count);
+            pArr[1] = reinterpret_cast<pointer>(next);
+        }
+    }
+
+    // 计算这个内存块的中间地址, 回收链表有两个, 一个是记录中间往左的地址, 一个是记录中间往右的地址
+    // 这样回收内存的时候可以快一倍, 先取中间地址, 然后判断是放到左边还是右边
+    inline pointer get_mid_address(PMEMORY_HEAD pHead)
+    {
+        LPBYTE pStart = reinterpret_cast<LPBYTE>(pHead) + sizeof(MEMORY_HEAD);
+        LPBYTE pEnd = (pStart + pHead->size - sizeof(MEMORY_HEAD));
+        size_t count = (pEnd - pStart) / sizeof(value_type);
+        size_t mid = count / 2;
+        return (pointer)(pStart + mid * sizeof(value_type));
+    }
+    
 };
 
-#if CMEMORYPOOL_ISDEBUG
-typedef int _Ty;
-#else
+#if CMEMORYPOOL_ISDEBUG == 0
 template<class _Ty, class _Alloc>
 #endif
 class CMemoryPoolView
@@ -659,6 +876,50 @@ public:
     {
         this->pool = pool;
     }
+
+    // 获取待分配内存, 不包含回收链表里的内存, 只记录所有内存块里连续地址那剩余的可分配内存
+    int GetItemSize()
+    {
+        size_t size = 0;
+        PMEMORY_HEAD pMemNode = pool->_Mem;
+        while (pMemNode)
+        {
+            LPBYTE pEnd = (LPBYTE)pMemNode + pMemNode->size;
+            if (pMemNode->item)
+                size += (pEnd - (LPBYTE)pMemNode->item);
+            pMemNode = pMemNode->next;
+        }
+        return (int)size;
+    }
+    // 获取回收的内存总尺寸, 返回单位为字节
+    int GetFreeListSize(int& listCount)
+    {
+        listCount = 0;
+        auto pfn_get_list_size = [&](PMEMORY_HEAD pHead) -> size_t
+        {
+            size_t count = 0;
+            PLIST_NODE list = pHead->list;
+            while (list)
+            {
+                listCount++;
+                PLIST_NODE next = nullptr;
+                count += pool->node_get_count(pHead, list, next);
+                if (next == nullptr)
+                    break;
+                list = next;
+            }
+            return count * sizeof(value_type);
+        };
+
+        size_t size = 0;
+        PMEMORY_HEAD pMemNode = pool->_Mem;
+        while (pMemNode)
+        {
+            size += pfn_get_list_size(pMemNode);
+            pMemNode = pMemNode->next;
+        }
+        return (int)size;
+    }
     // 获取内存池首个内存块
     PMEMORY_HEAD GetHead() const
     {
@@ -672,7 +933,7 @@ public:
     // 获取指定节点占用几个成员, 节点为空则返回0, 不为空最少返回1, 返回大于1表示是多个成员
     int GetNodeCount(PMEMORY_HEAD pHead, PLIST_NODE node, PLIST_NODE& pNextNode)
     {
-        return pool->get_node_count(pHead, node, pNextNode);
+        return (int)pool->node_get_count(pHead, node, pNextNode);
     }
     // 获取起始分配内存的起始地址和结束地址, 返回有多少个成员
     int GetItemStartEnd(PMEMORY_HEAD pHead, LPBYTE& pStart, LPBYTE& pEnd)
@@ -680,7 +941,7 @@ public:
         pStart = (LPBYTE)pHead;
         pEnd = pStart + pHead->size;
         pStart = pStart + sizeof(MEMORY_HEAD);
-        return (pEnd - pStart) / sizeof(value_type);
+        return (int)((pEnd - pStart) / sizeof(value_type));
     }
     // 传递一个地址, 确认这个地址是内存池里第几个成员, 不是指定成员就触发0xcc断点
     int PointerToIndex(PMEMORY_HEAD pHead, LPCVOID ptr)
@@ -702,11 +963,11 @@ public:
         if (p < begin || p >= end)
             return -1;
 
-        const int offset = p - begin;
+        const size_t offset = p - begin;
         if (offset % sizeof(value_type) != 0)
             return -1;
 
-        return offset / sizeof(value_type);
+        return (int)(offset / sizeof(value_type));
     };
 
     // 检测传入的地址是否是回收链表里的地址
@@ -715,7 +976,7 @@ public:
         PLIST_NODE node = pHead->list;
         while (node)
         {
-            PLIST_NODE pNextNode = 0;
+            PLIST_NODE pNextNode = nullptr;
 
             const int count = GetNodeCount(pHead, node, pNextNode);
             LPBYTE pNodeStart = reinterpret_cast<LPBYTE>(node);

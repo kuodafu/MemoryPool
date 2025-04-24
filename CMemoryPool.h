@@ -10,7 +10,7 @@ class CMemoryPool
 {
 private:
 #if CMEMORYPOOL_ISDEBUG
-    using value_type = int;
+    using value_type = CMemoryObjectPool::value_type;
     CMemoryObjectPool m_Pool;
 #else
     using value_type = PVOID;
@@ -46,7 +46,7 @@ public:
         const int cbSize = sizeof(PVOID);
 
         // size 字节尺寸需要的成员数, 加一个成员存放分配的成员数
-        const int count = ((size + cbSize - 1) / cbSize) + 1;
+        const int count = (((int)size + cbSize - 1) / cbSize) + 1;
 
         // 申请内存, 失败则抛出 std::bad_alloc 类型异常, 所以这里不需要处理失败的情况
         LPBYTE pStart = reinterpret_cast<LPBYTE>(m_Pool.malloc_arr(count, isClear));

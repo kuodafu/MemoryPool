@@ -61,17 +61,18 @@ public:
 
 };
 
-typedef int value_type;
 #if CMEMORYPOOL_ISDEBUG
+typedef kuodafu::CMemoryObjectPool::value_type value_type;
 static kuodafu::CMemoryObjectPool pool;
 static kuodafu::CMemoryPoolView pool_view;
 #else
+typedef size_t value_type;
 static kuodafu::CMemoryObjectPool<value_type, CAllocator> pool;
 static kuodafu::CMemoryPoolView<value_type, CAllocator> pool_view;
 #endif
 
 const int m_headSize = sizeof(kuodafu::MEMORY_HEAD);
-const int m_itemSize = sizeof(int);
+const int m_itemSize = sizeof(value_type);
 const int m_count = 10;
 static HFONT m_hFont;
 struct ITEM_VALUE
@@ -251,7 +252,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 const int index = pool_view.PointerToIndex(pHead, pFirst);
                 if (count > 1)
                 {
-                    PINT pArr = pool.malloc_arr(count);
+                    value_type* pArr = pool.malloc_arr(count);
                     for (int i = index; i < index + count; i++)
                     {
                         m_data[i].pAddr = &pArr[i - index];
@@ -496,7 +497,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         rc.bottom -= 20;
 
         wchar_t szSize[16] = { 0 };
-        const int nSize = swprintf_s(szSize, L"%d", pHead->size);
+        const int nSize = swprintf_s(szSize, L"%d", (int)pHead->size);
         for (int i = nSize; i < 10; i++)
             szSize[i] = L' ';
         szSize[10] = L'\0';
@@ -698,7 +699,7 @@ void DrawAllocator(HWND hWnd, HDC hdc, const RECT& rc)
         bool isAlloc = pool_view.IsAllocated(pHead, pAddr);
         const bool isFreeList = pool_view.IsFreeList(pHead, pAddr);
 
-        swprintf_s(sz, L"0x%p", pAddr);
+        swprintf_s(sz, L"0x%08llX", pAddr);
         m_rcBlock[i] = rcBlock;
         hbr = isFreeList ? hbrFreeList : (isAlloc ? hbrAllocated : hbrBlock);
 
