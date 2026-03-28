@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cl /EHsc /O2 /std:c++17 main.cpp /Fe:Release/stress_test.exe)"
+    ]
+  }
+}

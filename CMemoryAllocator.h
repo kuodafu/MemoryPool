@@ -1,4 +1,6 @@
-#pragma once
+ï»¿#pragma once
+#include <xmemory>
+#include <windows.h>
 #define CMEMORYPOOL_ISDEBUG 0
 
 #define NAMESPACE_MEMORYPOOL_BEGIN  namespace kuodafu {
@@ -10,9 +12,9 @@ NAMESPACE_MEMORYPOOL_BEGIN
 #if CMEMORYPOOL_ISDEBUG
 typedef size_t _Ty;
 #else
-template<class _Ty = LPVOID, class _Alloc = std::allocator<_Ty>>
+template<class _Ty = uint8_t, class _Alloc = std::allocator<_Ty>>
 #endif
-class CMemoryPoolAllocator : public std::allocator<BYTE>
+class CMemoryPoolAllocator : public std::allocator<uint8_t>
 {
 
 public:
@@ -25,7 +27,7 @@ public:
 
     }
 
-    // ÄÚ´æ³ØÊ¹ÓÃµÄÄÚ´æ·ÖÅäº¯Êý, ²ÎÊýÊÇ·ÖÅä¶àÉÙÒ³
+    // å†…å­˜æ± ä½¿ç”¨çš„å†…å­˜åˆ†é…å‡½æ•°, å‚æ•°æ˜¯åˆ†é…å¤šå°‘é¡µ
     __declspec(allocator) _Ty* allocate(_CRT_GUARDOVERFLOW const size_t _Count) {
         static_assert(sizeof(value_type) > 0, "value_type must be complete before calling allocate.");
         for (;;)
