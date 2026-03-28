@@ -12,7 +12,7 @@
 
 using namespace kuodafu;
 
-using alloc_type = int;
+using alloc_type = uint64_t;
 
 // 每个分配器需要提供 alloc 和 free 两个函数
 // 通过模板特化或重载实现不同分配器
@@ -50,7 +50,7 @@ struct Allocator_HeapAlloc
 // 4. VirtualAlloc / VirtualFree
 struct Allocator_VirtualAlloc
 {
-    int* alloc()
+    alloc_type* alloc()
     {
         return static_cast<alloc_type*>(VirtualAlloc(nullptr, sizeof(alloc_type), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     }
@@ -245,15 +245,6 @@ int main()
         print_result("MemoryPool", acc, baseline_time);
     }
 
-    // --- malloc ---
-    {
-        Allocator_malloc a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("malloc", acc, baseline_time);
-    }
-
     // --- HeapAlloc ---
     {
         Allocator_HeapAlloc a;
@@ -261,6 +252,15 @@ int main()
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
         print_result("HeapAlloc", acc, baseline_time);
+    }
+
+    // --- malloc ---
+    {
+        Allocator_malloc a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("malloc", acc, baseline_time);
     }
 
     // --- VirtualAlloc ---

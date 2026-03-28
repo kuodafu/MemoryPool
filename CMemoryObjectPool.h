@@ -6,9 +6,8 @@ NAMESPACE_MEMORYPOOL_BEGIN
 #if CMEMORYPOOL_ISDEBUG
 using _Ty = uint8_t;
 #else
-template<class _Ty = LPVOID, class _Alloc = std::allocator<_Ty>>
+template<class _Ty = LPVOID, class _Alloc = std::allocator<uint8_t>>
 #endif
-
 class CMemoryObjectPool
 {
 public:
@@ -76,7 +75,7 @@ public:
         while (node)
         {
             PMEMORY_HEAD next = node->next;
-            _Al.deallocate(reinterpret_cast<pointer>(node), node->size);
+            _Al.deallocate(reinterpret_cast<uint8_t*>(node), node->size);
             node = next;
         }
         _Mem = nullptr;
