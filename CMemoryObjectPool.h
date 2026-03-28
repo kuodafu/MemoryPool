@@ -15,51 +15,43 @@ public:
     using value_type    = _Ty;
     using pointer       = _Ty*;
     using const_pointer = const _Ty*;
+
 private:
-#if CMEMORYPOOL_ISDEBUG
-    using _Alloc = std::allocator<value_type>;
-#endif
+    using byte_pointer = uint8_t*;
 
-    using byte_pointer          = uint8_t*;
-    using const_byte_pointer    = const uint8_t*;
-
+    // 内存块头
     typedef struct MEMORY_HEAD
     {
-        MEMORY_HEAD*    next;           // 下一个内存块
-        size_t          size;           // 这一块内存占用的字节
-        byte_pointer    item;           // 下一个要分配的地址
-        uint32_t        head;           // 回收链表头, 存的是槽位相对于 pStart 的偏移量, 0 表示空链表
+        MEMORY_HEAD*    next;       // 下一个内存块
+        size_t          size;       // 这一块内存占用的总字节
+        byte_pointer    item;       // 下一个要分配的地址
     }*PMEMORY_HEAD;
 
-    // free 节点: 只存 next 偏移量 (4字节)
-    // next = 0 表示链表结束
-    typedef uint32_t FREE_NODE;
-
-    // 每个槽位大小: 取 value_type 和 FREE_NODE 的较大值
-    static constexpr size_t SLOT_SIZE = sizeof(value_type) >= sizeof(FREE_NODE) ? sizeof(value_type) : sizeof(FREE_NODE);
+    // 每个槽位最少 sizeof(void*), 保证能存放下一个节点的指针
+    static constexpr size_t SLOT_SIZE = sizeof(value_type) >= sizeof(void*) ? sizeof(value_type) : sizeof(void*);
 
     _Alloc              _Al;        // 分配器
+    byte_pointer        _List;      // 全局回收链表头, 指向第一个空闲节点, nullptr 表示空链表
     PMEMORY_HEAD        _Mem;       // 内存块链表头
     PMEMORY_HEAD        _Now;       // 当前操作的内存块
 
 public:
-    CMemoryObjectPool() :_Mem(nullptr), _Al(), _Now(nullptr)
-    {
-
-    }
-    explicit CMemoryObjectPool(size_t size) :_Mem(nullptr), _Al(), _Now(nullptr)
+    CMemoryObjectPool() : _List(nullptr), _Mem(nullptr), _Al(), _Now(nullptr) {}
+    explicit CMemoryObjectPool(size_t size) : _List(nullptr), _Mem(nullptr), _Al(), _Now(nullptr)
     {
         init(size);
     }
     CMemoryObjectPool(const CMemoryObjectPool& other) = delete;
     CMemoryObjectPool& operator=(const CMemoryObjectPool& other) = delete;
 
-    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept :_Mem(nullptr), _Al(), _Now(nullptr)
+    CMemoryObjectPool(CMemoryObjectPool&& other) noexcept : _List(nullptr), _Mem(nullptr), _Al(), _Now(nullptr)
     {
         _Al = std::move(other._Al);
+        _List = other._List;
         _Mem = other._Mem;
         _Now = other._Now;
 
+        other._List = nullptr;
         other._Mem = nullptr;
         other._Now = nullptr;
     }
@@ -67,6 +59,8 @@ public:
     {
         Release();
     }
+
+    // 释放所有内存
     inline void Release()
     {
         PMEMORY_HEAD node = _Mem;
@@ -76,237 +70,136 @@ public:
             _Al.deallocate(reinterpret_cast<uint8_t*>(node), node->size);
             node = next;
         }
+        _List = nullptr;
         _Mem = nullptr;
         _Now = nullptr;
     }
-    // 清空内存池, 恢复到初始状态
+
+    // 清空内存池: 重置所有块到初始状态
     inline void clear()
     {
         if (!_Mem)
             return;
-
-        PMEMORY_HEAD pHead = _Mem;
+        _List = nullptr;
         _Now = _Mem;
+        PMEMORY_HEAD pHead = _Mem;
         while (pHead)
         {
             pHead->item = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
-            pHead->head = 0;
             pHead = pHead->next;
         }
     }
 
-    // 返回当前内存池总共占用的字节数
+    // 当前内存池占用的总字节数
     inline size_t size() const
     {
-        size_t size = 0;
-        PMEMORY_HEAD pMemNode = _Mem;
-        while (pMemNode)
+        size_t total = 0;
+        PMEMORY_HEAD p = _Mem;
+        while (p)
         {
-            size += pMemNode->size;
-            pMemNode = pMemNode->next;
+            total += p->size;
+            p = p->next;
         }
-        return size;
+        return total;
     }
 
-    // 初始化内存池, 内部会申请空间
-    inline bool init(size_t size = 0x1000)
+    // 初始化内存池
+    inline bool init(size_t count = 0x1000)
     {
         if (_Mem)
             return true;
-
-        _Mem = malloc_head(size);
+        _Mem = malloc_head(count);
         _Now = _Mem;
         return true;
     }
 
-    inline void swap(CMemoryObjectPool& other)
-    {
-        _Alloc&& _Al = std::move(other._Al);
-        PMEMORY_HEAD _Mem = other._Mem;
-        PMEMORY_HEAD _Now = other._Now;
-
-        other._Mem = this->_Mem;
-        other._Now = this->_Now;
-        other._Al = std::move(this->_Al);
-
-        this->_Mem = _Mem;
-        this->_Now = _Now;
-        this->_Al = std::move(_Al);
-    }
-
-    // 申请一个成员, 申请失败则抛出 std::bad_alloc 类型异常
-    // 注意: 如果 sizeof(value_type) < sizeof(FREE_NODE), 用户数据会被槽位大小限制
+    // 申请一个成员, 失败抛出 std::bad_alloc
     inline pointer malloc()
     {
         if (!_Mem)
             init();
-
         if (!_Mem)
             throw std::bad_alloc();
 
-        // 第一步: 先看 _Now 能不能分配
-        if (pointer p = try_alloc_from_block(_Now))
+        // 第一步: 从全局回收链表分配
+        if (_List)
         {
-            return p;  // _Now 不变, 下次继续从它分配
+            byte_pointer p = _List;
+            _List = *reinterpret_cast<byte_pointer*>(p);
+            return reinterpret_cast<pointer>(p);
         }
 
-        // 第二步: _Now 不够, 遍历所有块找还有空间的
-        PMEMORY_HEAD pHead = _Mem;
-        PMEMORY_HEAD pLastHead = pHead;
-        while (pHead)
-        {
-            if (pHead == _Now)
-            {
-                pHead = pHead->next;
-                continue;
-            }
-
-            if (pointer p = try_alloc_from_block(pHead))
-            {
-                // 先判断刚分配的这个块是否还有空间
-                if (has_free_space(pHead))
-                {
-                    _Now = pHead;  // 还有空间, 切换到它
-                    return p;
-                }
-                // 刚分配的块耗尽了, 往后找下一个有空间的块
-                _Now = find_next_available_block(pHead, &pLastHead);
-                if (!_Now)
-                    _Now = expand(pLastHead);  // 所有块都没有可用内存, 申请新块
-                return p;
-            }
-            pLastHead = pHead;
-            pHead = pHead->next;
-        }
-
-        // 第三步: 所有块都没有可用内存, 申请新块
-        _Now = expand(pLastHead);
-
-        // 从新块分配
+        // 第二步: 从当前块分配
+        byte_pointer pEnd = reinterpret_cast<byte_pointer>(_Now) + _Now->size;
         byte_pointer ptr = _Now->item;
+        if (ptr + SLOT_SIZE > pEnd)
+        {
+            // 第三步: 所有块都不够, 申请新块
+            size_t oldCount = (_Now->size - sizeof(MEMORY_HEAD)) / SLOT_SIZE;
+            PMEMORY_HEAD pHead = malloc_head(oldCount * 2 + 1);
+
+            _Now->next = pHead;
+            _Now = pHead;
+            ptr = _Now->item;
+        }
         _Now->item += SLOT_SIZE;
         return reinterpret_cast<pointer>(ptr);
     }
 
-    // 释放一个成员, 链入对应内存块的回收链表
+    // 释放一个成员, 链入全局回收链表
     inline bool free(pointer p)
     {
-        PMEMORY_HEAD pHead = get_head(p);
-        if (!pHead)
-        {
-            throw std::exception(__FUNCTION__ ": 传递进来了不是内存池里的地址", 1);
+        if (!p)
             return false;
-        }
-
-        auto pStart = reinterpret_cast<byte_pointer>(pHead);
-        auto nodeOffset = static_cast<uint32_t>(reinterpret_cast<byte_pointer>(p) - pStart);
-
-        // 节点 next 指向当前 head, head 指向新节点
-        auto pNode = reinterpret_cast<FREE_NODE*>(reinterpret_cast<byte_pointer>(p));
-        *pNode = pHead->head;  // 写入 next 偏移量
-        pHead->head = nodeOffset;
+        *reinterpret_cast<byte_pointer*>(p) = _List;
+        _List = reinterpret_cast<byte_pointer>(p);
         return true;
     }
 
-    // 查询地址是否是内存池里的地址
+    // 查询地址是否属于内存池
     inline bool query(pointer p) const
     {
         return get_head(p) != nullptr;
     }
 
-    // 输出当前内存池的状态
+    // 输出当前内存池状态
     inline void dump() const
     {
         PMEMORY_HEAD pHead = _Mem;
         int index = 0;
+        int freeCount = 0;
+        byte_pointer f = _List;
+        while (f)
+        {
+            freeCount++;
+            f = *reinterpret_cast<byte_pointer*>(f);
+        }
         while (pHead)
         {
             byte_pointer pAllocStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
-            int count = static_cast<int>(((pHead->item - pAllocStart) / SLOT_SIZE));
-            printf("%03d: 内存块首地址 0x%p, 起始分配地址: 0x%p, 尺寸: %u, 已分配 %d 个成员, head偏移量 = %u\n",
-                   index++, pHead, pAllocStart, (uint32_t)pHead->size, count, pHead->head);
+            int count = static_cast<int>((pHead->item - pAllocStart) / SLOT_SIZE);
+            printf("%03d: 块地址 0x%p, 尺寸 %u, 已分配 %d 个, head = 0x%p\n",
+                   index++, pHead, (uint32_t)pHead->size, count, (void*)pHead);
             pHead = pHead->next;
         }
+        printf("空闲节点数: %d\n", freeCount);
     }
 
 private:
-    // 检测内存块是否还有空闲内存可分配 (free list 或 item)
-    inline bool has_free_space(PMEMORY_HEAD pHead) const
-    {
-        if (pHead->head != 0)
-            return true;
-        byte_pointer pEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
-        return pHead->item + SLOT_SIZE <= pEnd;
-    }
-
-    // 从指定块开始遍历, 找到下一个还有空闲内存的块, 找不到返回 nullptr
-    // 跳过 pStart 本身
-    // 如果返回nullptr, 那么 pLastHead 就是接收最后一个内存块的地址
-    inline PMEMORY_HEAD find_next_available_block(PMEMORY_HEAD pStart, PMEMORY_HEAD* pLastHead) const
-    {
-        *pLastHead = pStart;
-        PMEMORY_HEAD pHead = pStart->next;
-        while (pHead)
-        {
-            *pLastHead = pHead;
-            if (has_free_space(pHead))
-                return pHead;
-            pHead = pHead->next;
-        }
-        return nullptr;
-    }
-
-    // 从指定内存块尝试分配, 返回 nullptr 表示该块无可用内存
-    inline pointer try_alloc_from_block(PMEMORY_HEAD pHead)
-    {
-        // 从 item 分配
-        byte_pointer pEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
-        byte_pointer ptr = pHead->item;
-        if (ptr + SLOT_SIZE <= pEnd)
-        {
-            pHead->item += SLOT_SIZE;
-            return reinterpret_cast<pointer>(ptr);
-        }
-
-        // 从 free list 分配
-        if (pHead->head != 0)
-        {
-            auto pStart = reinterpret_cast<byte_pointer>(pHead);
-            auto pNode = reinterpret_cast<FREE_NODE*>(pStart + pHead->head);
-            uint32_t nextOffset = *pNode;
-            pHead->head = nextOffset;
-            return reinterpret_cast<pointer>(pNode);
-        }
-
-        return nullptr;
-    }
-
-    // 检测地址是否在内存块的有效槽位范围内
-    inline bool is_head(PMEMORY_HEAD pHead, const void* p) const
-    {
-        byte_pointer ptr = reinterpret_cast<byte_pointer>(const_cast<void*>(p));
-        byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
-        byte_pointer pEnd = pStart + pHead->size - sizeof(MEMORY_HEAD);
-
-        return ptr >= pStart && ptr <= pEnd;
-        if (ptr >= pStart && ptr <= pEnd)
-        {
-            const size_t offset = ptr - pStart;
-            if (offset % SLOT_SIZE == 0)
-                return true;
-        }
-        return false;
-    }
-
     // 返回地址所属的内存块
     inline PMEMORY_HEAD get_head(const void* p) const
     {
-        PMEMORY_HEAD pMemNode = _Mem;
-        while (pMemNode)
+        PMEMORY_HEAD pHead = _Mem;
+        while (pHead)
         {
-            if (is_head(pMemNode, p))
-                return pMemNode;
-            pMemNode = pMemNode->next;
+            byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+            byte_pointer pEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
+            if (reinterpret_cast<byte_pointer>(const_cast<void*>(p)) >= pStart &&
+                reinterpret_cast<byte_pointer>(const_cast<void*>(p)) < pEnd)
+            {
+                return pHead;
+            }
+            pHead = pHead->next;
         }
         return nullptr;
     }
@@ -314,44 +207,25 @@ private:
     // 分配一块内存
     inline PMEMORY_HEAD malloc_head(size_t count)
     {
-        auto size = sizeof(MEMORY_HEAD) + count * SLOT_SIZE;
-        auto newSize = align_up(size, 0x1000);
-        auto pStart = reinterpret_cast<byte_pointer>(_Al.allocate(newSize));
+        auto totalSize = count * SLOT_SIZE;
+        auto pStart = reinterpret_cast<byte_pointer>(_Al.allocate(totalSize));
 
         PMEMORY_HEAD pHead = reinterpret_cast<PMEMORY_HEAD>(pStart);
         pHead->next = nullptr;
-        pHead->size = newSize;
+        pHead->size = totalSize;
         pHead->item = pStart + sizeof(MEMORY_HEAD);
-        pHead->head = 0;
         return pHead;
     }
 
-    // 扩充内存: 从指定块开始找到链表尾部, 在尾部追加一个新块
-    // count 为新块的槽位数量, 默认为给定块的 2 倍 + 1
-    inline PMEMORY_HEAD expand(PMEMORY_HEAD pHead, size_t count = 0)
+    // 扩充: 在链表尾部追加一个新块
+    inline PMEMORY_HEAD expand(PMEMORY_HEAD pTail)
     {
-        if (!pHead)
+        if (!pTail)
             return nullptr;
-
-        // 找到链表尾部
-        PMEMORY_HEAD pTail = pHead;
-        while (pTail->next)
-            pTail = pTail->next;
-
-        // 计算新块大小
-        if (count == 0)
-            count = (pHead->size - sizeof(MEMORY_HEAD)) / SLOT_SIZE * 2 + 1;
-
-        auto pNew = malloc_head(count);
+        size_t oldCount = (pTail->size - sizeof(MEMORY_HEAD)) / SLOT_SIZE;
+        PMEMORY_HEAD pNew = malloc_head(oldCount * 2 + 1);
         pTail->next = pNew;
         return pNew;
-    }
-
-    template <typename T, typename R>
-    constexpr T align_up(T value, R alignment) noexcept
-    {
-        static_assert(std::is_unsigned_v<T> || std::is_unsigned_v<R>, "Value and alignment must be unsigned");
-        return (value + alignment - 1) & ~(alignment - 1);
     }
 };
 

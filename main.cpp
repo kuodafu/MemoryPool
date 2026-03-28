@@ -6,13 +6,20 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <type_traits>
 #include <windows.h>
 #include <psapi.h>
 #include "CMemoryObjectPool.h"
 
 using namespace kuodafu;
 
-using alloc_type = uint64_t;
+using alloc_type = PAINTSTRUCT;
+
+// 写入测试数据: 简单类型用随机值赋值, 结构体用 memset 随机字节
+inline void write_test_data(alloc_type* p, unsigned int seed)
+{
+    std::memset(p, seed & 0xFF, (std::min)(sizeof(alloc_type), sizeof(seed)));
+}
 
 // 每个分配器需要提供 alloc 和 free 两个函数
 // 通过模板特化或重载实现不同分配器
@@ -80,21 +87,30 @@ struct Allocator_newArray
 
 struct StressTestResult
 {
-    double alloc_time;   // 分配耗时 (ms)
-    double free_time;    // 释放耗时 (ms)
-    double total_time;   // 总耗时 (ms)
-    double mem_before_alloc;  // 分配前内存 (MB)
-    double mem_before_free;   // 释放前内存 (MB)
-    double mem_after_free;    // 释放后内存 (MB)
-    int count;           // 累计次数
+    double alloc_time;     // 分配耗时
+    double random_rw_time; // 随机读写耗时
+    double random_free_time; // 随机释放耗时
+    double realloc_time;   // 再分配耗时
+    double random_rw2_time; // 再次随机读写耗时
+    double free_all_time;  // 释放所有耗时
+    double total_time;     // 总耗时
+    double mem_before_alloc;
+    double mem_before_free;
+    double mem_after_free;
+    int count;
 
-    StressTestResult() : alloc_time(0), free_time(0), total_time(0),
+    StressTestResult() : alloc_time(0), random_rw_time(0), random_free_time(0),
+        realloc_time(0), random_rw2_time(0), free_all_time(0), total_time(0),
         mem_before_alloc(0), mem_before_free(0), mem_after_free(0), count(0) {}
 
     StressTestResult& operator+=(const StressTestResult& other)
     {
         alloc_time += other.alloc_time;
-        free_time += other.free_time;
+        random_rw_time += other.random_rw_time;
+        random_free_time += other.random_free_time;
+        realloc_time += other.realloc_time;
+        random_rw2_time += other.random_rw2_time;
+        free_all_time += other.free_all_time;
         total_time += other.total_time;
         mem_before_alloc += other.mem_before_alloc;
         mem_before_free += other.mem_before_free;
@@ -104,24 +120,32 @@ struct StressTestResult
     }
 };
 
-// 打印测试结果: 接收名称、累加结果、基准时间，自动对齐
-inline void print_result(const char* name, const StressTestResult& acc, double baseline_time)
+// 打印测试结果
+inline void print_result(const char* name, const StressTestResult& acc)
 {
-    double avg_alloc = acc.alloc_time / acc.count;
-    double avg_free = acc.free_time / acc.count;
-    double avg_total = acc.total_time / acc.count;
-    double avg_bef_alloc = acc.mem_before_alloc / acc.count;
-    double avg_bef_free = acc.mem_before_free / acc.count;
-    double avg_aft_free = acc.mem_after_free / acc.count;
+    double c = static_cast<double>(acc.count);
+    double a_alloc = acc.alloc_time / c;
+    double a_rw = acc.random_rw_time / c;
+    double a_rfree = acc.random_free_time / c;
+    double a_realloc = acc.realloc_time / c;
+    double a_rw2 = acc.random_rw2_time / c;
+    double a_free = acc.free_all_time / c;
+    double a_total = acc.total_time / c;
+    double a_bef_alloc = acc.mem_before_alloc / c;
+    double a_bef_free = acc.mem_before_free / c;
+    double a_aft_free = acc.mem_after_free / c;
 
-    std::cout << "| " << std::left << std::setw(16) << name << " | "
-              << std::right << std::setw(8) << avg_alloc << " | "
-              << std::setw(8) << avg_free << " | "
-              << std::setw(8) << avg_total << " | "
-              << std::setw(10) << avg_bef_alloc << " | "
-              << std::setw(10) << avg_bef_free << " | "
-              << std::setw(10) << avg_aft_free << " | "
-              << std::setw(4) << std::fixed << std::setprecision(2) << (avg_total / baseline_time) << " |" << std::endl;
+    std::cout << "| " << std::left << std::setw(12) << name << " | "
+              << std::right << std::setw(8) << a_alloc << " | "
+              << std::setw(8) << a_rw << " | "
+              << std::setw(8) << a_rfree << " | "
+              << std::setw(8) << a_realloc << " | "
+              << std::setw(9) << a_rw2 << " | "
+              << std::setw(8) << a_free << " | "
+              << std::setw(8) << a_total << " | "
+              << std::setw(8) << a_bef_alloc << " | "
+              << std::setw(8) << a_bef_free << " | "
+              << std::setw(8) << a_aft_free << " |" << std::endl;
 }
 
 // 获取进程内存占用 (MB)
@@ -146,29 +170,31 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
     std::vector<alloc_type*> live_ptrs;
     live_ptrs.reserve(_Count);
 
-    double mem_before_alloc = get_process_memory_mb();
+    StressTestResult r;
+    r.mem_before_alloc = get_process_memory_mb();
 
-    // 分配阶段: 分配 _Count 次
+    // 1. 分配 _Count 次
     auto t0 = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < _Count; i++)
     {
         alloc_type* p = alloc.alloc();
-        *p = static_cast<alloc_type>(val_dist(rng));
+        write_test_data(p, val_dist(rng));
         live_ptrs.push_back(p);
     }
     auto t1 = std::chrono::high_resolution_clock::now();
 
-    // 随机读写阶段: 随机选一个存活的指针读写
+    // 2. 随机读写
     std::uniform_int_distribution<size_t> idx_dist(0, live_ptrs.size() - 1);
     for (size_t i = 0; i < _Count; i++)
     {
         size_t idx = idx_dist(rng);
         alloc_type* p = live_ptrs[idx];
-        *p = static_cast<alloc_type>(val_dist(rng));
-        volatile alloc_type x = *p; (void)x;  // 防止编译器优化掉读
+        write_test_data(p, val_dist(rng));
+        volatile alloc_type x = *p; (void)x;
     }
+    auto t2 = std::chrono::high_resolution_clock::now();
 
-    // 随机释放阶段: 随机释放一半的存活指针
+    // 3. 随机释放一半
     size_t half = live_ptrs.size() / 2;
     for (size_t i = 0; i < half; i++)
     {
@@ -178,41 +204,43 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
         live_ptrs[idx] = live_ptrs.back();
         live_ptrs.pop_back();
     }
+    auto t3 = std::chrono::high_resolution_clock::now();
 
-    double mem_before_free = get_process_memory_mb();
+    r.mem_before_free = get_process_memory_mb();
 
-    // 再分配: 填补被释放的空缺
+    // 4. 再分配填补空缺
     for (size_t i = 0; i < half; i++)
     {
         alloc_type* p = alloc.alloc();
-        *p = static_cast<alloc_type>(val_dist(rng));
+        write_test_data(p, val_dist(rng));
         live_ptrs.push_back(p);
     }
+    auto t4 = std::chrono::high_resolution_clock::now();
 
-    // 再次随机读写
+    // 5. 再次随机读写
     for (size_t i = 0; i < _Count; i++)
     {
         size_t idx = idx_dist(rng);
         alloc_type* p = live_ptrs[idx];
-        *p = static_cast<alloc_type>(val_dist(rng));
+        write_test_data(p, val_dist(rng));
         volatile alloc_type x = *p; (void)x;
     }
+    auto t5 = std::chrono::high_resolution_clock::now();
 
-    // 释放所有
-    auto t2 = std::chrono::high_resolution_clock::now();
+    // 6. 释放所有
     for (alloc_type* p : live_ptrs)
         alloc.free(p);
-    auto t3 = std::chrono::high_resolution_clock::now();
+    auto t6 = std::chrono::high_resolution_clock::now();
 
-    double mem_after_free = get_process_memory_mb();
+    r.mem_after_free = get_process_memory_mb();
 
-    StressTestResult r;
-    r.alloc_time      = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    r.free_time       = std::chrono::duration<double, std::milli>(t3 - t2).count();
-    r.total_time      = std::chrono::duration<double, std::milli>(t3 - t0).count();
-    r.mem_before_alloc = mem_before_alloc;
-    r.mem_before_free  = mem_before_free;
-    r.mem_after_free   = mem_after_free;
+    r.alloc_time     = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.random_rw_time = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    r.random_free_time = std::chrono::duration<double, std::milli>(t3 - t2).count();
+    r.realloc_time   = std::chrono::duration<double, std::milli>(t4 - t3).count();
+    r.random_rw2_time = std::chrono::duration<double, std::milli>(t5 - t4).count();
+    r.free_all_time  = std::chrono::duration<double, std::milli>(t6 - t5).count();
+    r.total_time     = std::chrono::duration<double, std::milli>(t6 - t0).count();
     r.count = 1;
     return r;
 }
@@ -221,19 +249,17 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
 
 int main()
 {
-    constexpr size_t N = 1000000;   // 每次测试分配 100 万次
-    constexpr int SEED = 12345;     // 固定随机种子
-    constexpr int ROUND = 1;      // 每种分配器跑 10 轮取平均
+    constexpr size_t N = 1000000;
+    constexpr int SEED = 12345;
+    constexpr int ROUND = 1;
 
     std::cout << "========== 内存分配器暴力测试 ==========" << std::endl;
     std::cout << "分配次数: " << N << " 次/轮, 测试 " << ROUND << " 轮取平均" << std::endl;
     std::cout << std::endl;
 
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "| Allocator        | 分配(ms) | 释放(ms) | 总计(ms) | 分配前(M)  | 释放前(M)  | 释放后(M)  | 相对 |" << std::endl;
-    std::cout << "|------------------|----------|----------|----------|------------|------------|------------|------|" << std::endl;
-
-    double baseline_time = 0;
+    std::cout << "| Allocator    |   分配   | 随机读写 | 随机释放 |  再分配  | 随机读写2 | 释放所有 |   总计   | 分配前   | 释放前   | 释放后   |\n";
+    std::cout << "|--------------|----------|----------|----------|----------|-----------|----------|----------|----------|----------|----------|\n";
 
     // --- MemoryPool ---
     {
@@ -241,8 +267,7 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
-        baseline_time = acc.total_time / acc.count;
-        print_result("MemoryPool", acc, baseline_time);
+        print_result("MemoryPool", acc);
     }
 
     // --- HeapAlloc ---
@@ -251,7 +276,7 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
-        print_result("HeapAlloc", acc, baseline_time);
+        print_result("HeapAlloc", acc);
     }
 
     // --- malloc ---
@@ -260,7 +285,7 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
-        print_result("malloc", acc, baseline_time);
+        print_result("malloc", acc);
     }
 
     // --- VirtualAlloc ---
@@ -269,7 +294,7 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < 1; i++)
             acc += stress_test(a, N, SEED + i);
-        print_result("VirtualAlloc", acc, baseline_time);
+        print_result("VirtualAlloc", acc);
     }
 
     // --- new ---
@@ -278,7 +303,7 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
-        print_result("new", acc, baseline_time);
+        print_result("new", acc);
     }
 
     // --- new[] ---
@@ -287,10 +312,10 @@ int main()
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
-        print_result("new[]", acc, baseline_time);
+        print_result("new[]", acc);
     }
 
-    std::cout << "|-------------------------------------------------------------------------------------------------|\n\n";
+    std::cout << "|-----------------------------------------------------------------------------------------------------------------------------|" << std::endl;
  
     std::cout << "测试完成, 按回车退出..." << std::endl;
     std::cin.get();
