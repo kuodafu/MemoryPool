@@ -5,8 +5,9 @@ NAMESPACE_MEMORYPOOL_BEGIN
 // 定长内存池, 每次分配都是固定大小的内存
 #if CMEMORYPOOL_ISDEBUG
 using _Ty = uint8_t;
+using _Alloc = CMemoryPoolAllocator;
 #else
-template<class _Ty = LPVOID, class _Alloc = std::allocator<uint8_t>>
+template<class _Ty = uint8_t, class _Alloc = CMemoryPoolAllocator<uint8_t>>
 #endif
 class CMemoryObjectPool
 {
@@ -36,9 +37,6 @@ private:
 
     // 每个槽位大小: 取 value_type 和 FREE_NODE 的较大值
     static constexpr size_t SLOT_SIZE = sizeof(value_type) >= sizeof(FREE_NODE) ? sizeof(value_type) : sizeof(FREE_NODE);
-
-    // 槽位足够存放下一个内存块指针时, 用指针直接定位块 (O(1) free)
-    static constexpr bool USES_BLOCK_PTR = SLOT_SIZE >= sizeof(PMEMORY_HEAD);
 
     _Alloc              _Al;        // 分配器
     PMEMORY_HEAD        _Mem;       // 内存块链表头
@@ -316,7 +314,8 @@ private:
     // 分配一块内存
     inline PMEMORY_HEAD malloc_head(size_t count)
     {
-        auto newSize = sizeof(MEMORY_HEAD) + count * SLOT_SIZE;
+        auto size = sizeof(MEMORY_HEAD) + count * SLOT_SIZE;
+        auto newSize = align_up(size, 0x1000);
         auto pStart = reinterpret_cast<byte_pointer>(_Al.allocate(newSize));
 
         PMEMORY_HEAD pHead = reinterpret_cast<PMEMORY_HEAD>(pStart);
@@ -346,6 +345,13 @@ private:
         auto pNew = malloc_head(count);
         pTail->next = pNew;
         return pNew;
+    }
+
+    template <typename T, typename R>
+    constexpr T align_up(T value, R alignment) noexcept
+    {
+        static_assert(std::is_unsigned_v<T> || std::is_unsigned_v<R>, "Value and alignment must be unsigned");
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 };
 

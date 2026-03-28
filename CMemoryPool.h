@@ -7,7 +7,7 @@ NAMESPACE_MEMORYPOOL_BEGIN
 #if CMEMORYPOOL_ISDEBUG
 class CMemoryPoolView;
 #else
-template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>> class CMemoryPoolView;
+template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>;
 #endif
 
 // 定长内存池, 每次分配都是固定大小的内存
