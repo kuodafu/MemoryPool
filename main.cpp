@@ -523,50 +523,50 @@ int main()
         print_result("MemoryPool", acc);
     }
 
-    //// --- HeapAlloc ---
-    //{
-    //    Allocator_HeapAlloc a;
-    //    StressTestResult acc;
-    //    for (int i = 0; i < ROUND; i++)
-    //        acc += stress_test(a, N, SEED + i);
-    //    print_result("HeapAlloc", acc);
-    //}
+    // --- HeapAlloc ---
+    {
+        Allocator_HeapAlloc a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("HeapAlloc", acc);
+    }
 
-    //// --- malloc ---
-    //{
-    //    Allocator_malloc a;
-    //    StressTestResult acc;
-    //    for (int i = 0; i < ROUND; i++)
-    //        acc += stress_test(a, N, SEED + i);
-    //    print_result("malloc", acc);
-    //}
+    // --- malloc ---
+    {
+        Allocator_malloc a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("malloc", acc);
+    }
 
-    //// --- new ---
-    //{
-    //    Allocator_new a;
-    //    StressTestResult acc;
-    //    for (int i = 0; i < ROUND; i++)
-    //        acc += stress_test(a, N, SEED + i);
-    //    print_result("new", acc);
-    //}
+    // --- new ---
+    {
+        Allocator_new a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("new", acc);
+    }
 
-    //// --- new[] ---
-    //{
-    //    Allocator_newArray a;
-    //    StressTestResult acc;
-    //    for (int i = 0; i < ROUND; i++)
-    //        acc += stress_test(a, N, SEED + i);
-    //    print_result("new[]", acc);
-    //}
+    // --- new[] ---
+    {
+        Allocator_newArray a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("new[]", acc);
+    }
 
-    //// --- mimalloc ---
-    //{
-    //    Allocator_mimalloc a;
-    //    StressTestResult acc;
-    //    for (int i = 0; i < ROUND; i++)
-    //        acc += stress_test(a, N, SEED + i);
-    //    print_result("mimalloc", acc);
-    //}
+    // --- mimalloc ---
+    {
+        Allocator_mimalloc a;
+        StressTestResult acc;
+        for (int i = 0; i < ROUND; i++)
+            acc += stress_test(a, N, SEED + i);
+        print_result("mimalloc", acc);
+    }
 
     std::cout << "|--------------------------------------------------------------------------------------------------------------------------|" << std::endl;
 

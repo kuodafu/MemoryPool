@@ -396,6 +396,7 @@ private:
         size_t allocatedSlots = static_cast<size_t>(pHead->item - pStart) / SLOT_SIZE;
         if (allocatedSlots == pHead->freeCount)
         {
+            pHead->item = pStart;
             pHead->freeList = nullptr;
             pHead->freeCount = 0;
         }
