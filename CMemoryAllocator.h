@@ -20,6 +20,7 @@
     #define _MEMPOOL_PLATFORM_OTHER 1
     #include <stdlib.h>
 #endif
+#include <mimalloc.h>
 
 NAMESPACE_MEMORYPOOL_BEGIN
 
@@ -54,6 +55,8 @@ public:
 
     pointer allocate(size_type _Count, const void* _Hint = nullptr)
     {
+        //return reinterpret_cast<pointer>(mi_malloc(_Count));
+
 #if defined(_MEMPOOL_PLATFORM_WINDOWS)
         void* p = VirtualAlloc(nullptr, _Count * sizeof(_Ty), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!p)

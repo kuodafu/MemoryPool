@@ -9,15 +9,17 @@
 #include <type_traits>
 #include <windows.h>
 #include <psapi.h>
+#include <mimalloc.h>
 #include "CMemoryObjectPool.h"
 
 using namespace kuodafu;
 
-using alloc_type = PAINTSTRUCT;
+using alloc_type = int;
 
 // 写入测试数据: 简单类型用随机值赋值, 结构体用 memset 随机字节
 inline void write_test_data(alloc_type* p, unsigned int seed)
 {
+    seed = 0x66;
     std::memset(p, seed & 0xFF, (std::min)(sizeof(alloc_type), sizeof(seed)));
 }
 
@@ -29,7 +31,8 @@ inline void write_test_data(alloc_type* p, unsigned int seed)
 // 1. 内存池分配器
 struct Allocator_MemoryPool
 {
-    CMemoryObjectPool<alloc_type> pool;
+    //CMemoryObjectPool<alloc_type, std::allocator<uint8_t>> pool;
+    CMemoryObjectPool<alloc_type, CMemoryPoolAllocator<uint8_t>> pool;
     alloc_type* alloc() { return pool.malloc(); }
     void free(alloc_type* p) { pool.free(p); }
     const char* name() const { return "MemoryPool"; }
@@ -81,6 +84,14 @@ struct Allocator_newArray
     alloc_type* alloc() { return new alloc_type[1]; }
     void free(alloc_type* p) { delete[] p; }
     const char* name() const { return "new[]"; }
+};
+
+// 7. mimalloc
+struct Allocator_mimalloc
+{
+    alloc_type* alloc() { return static_cast<alloc_type*>(mi_malloc(sizeof(alloc_type))); }
+    void free(alloc_type* p) { mi_free(p); }
+    const char* name() const { return "mimalloc"; }
 };
 
 // ==================== 测试框架 ====================
@@ -143,9 +154,9 @@ inline void print_result(const char* name, const StressTestResult& acc)
               << std::setw(9) << a_rw2 << " | "
               << std::setw(8) << a_free << " | "
               << std::setw(8) << a_total << " | "
-              << std::setw(8) << a_bef_alloc << " | "
-              << std::setw(8) << a_bef_free << " | "
-              << std::setw(8) << a_aft_free << " |" << std::endl;
+              << std::setw(7) << a_bef_alloc << " | "
+              << std::setw(7) << a_bef_free << " | "
+              << std::setw(7) << a_aft_free << " |" << std::endl;
 }
 
 // 获取进程内存占用 (MB)
@@ -245,78 +256,358 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
     return r;
 }
 
+// ==================== 内存池压力测试 ====================
+
+struct PoolStressResult
+{
+    double total_time;
+    double alloc_time;
+    double free_time;
+    double mem_peak;
+    size_t count;
+
+    PoolStressResult() : total_time(0), alloc_time(0), free_time(0), mem_peak(0), count(0) {}
+
+    PoolStressResult& operator+=(const PoolStressResult& other)
+    {
+        total_time += other.total_time;
+        alloc_time += other.alloc_time;
+        free_time += other.free_time;
+        mem_peak += other.mem_peak;
+        count += other.count;
+        return *this;
+    }
+};
+
+// 场景1: 每次分配后立即释放, 测试 alloc+free 的配对效率
+template<class _Alloc>
+PoolStressResult test_alloc_free_pair(_Alloc& alloc, size_t _Count, int _Seed)
+{
+    std::mt19937 rng(static_cast<unsigned int>(_Seed));
+    std::uniform_int_distribution<int> val_dist(0, 0x7FFFFFFF);
+
+    PoolStressResult r;
+    double peak = 0;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < _Count; i++)
+    {
+        alloc_type* p = alloc.alloc();
+        write_test_data(p, val_dist(rng));
+        double mem = get_process_memory_mb();
+        if (mem > peak) peak = mem;
+        alloc.free(p);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    r.total_time = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.alloc_time = r.total_time * 0.5;  // 近似
+    r.free_time  = r.total_time * 0.5;
+    r.mem_peak   = peak;
+    r.count = 1;
+    return r;
+}
+
+// 场景2: 批量分配后批量释放, 测试批量操作的吞吐
+template<class _Alloc>
+PoolStressResult test_batch_alloc_free(_Alloc& alloc, size_t _Count, int _Seed)
+{
+    std::mt19937 rng(static_cast<unsigned int>(_Seed));
+    std::uniform_int_distribution<int> val_dist(0, 0x7FFFFFFF);
+
+    std::vector<alloc_type*> ptrs;
+    ptrs.reserve(_Count);
+
+    PoolStressResult r;
+    double peak = 0;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < _Count; i++)
+    {
+        alloc_type* p = alloc.alloc();
+        write_test_data(p, val_dist(rng));
+        ptrs.push_back(p);
+        double mem = get_process_memory_mb();
+        if (mem > peak) peak = mem;
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    for (size_t i = 0; i < _Count; i++)
+        alloc.free(ptrs[i]);
+    auto t2 = std::chrono::high_resolution_clock::now();
+
+    r.alloc_time  = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.free_time  = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    r.total_time = r.alloc_time + r.free_time;
+    r.mem_peak   = peak;
+    r.count = 1;
+    return r;
+}
+
+// 场景3: 固定数量池子, 持续随机分配/释放, 模拟对象池
+template<class _Alloc>
+PoolStressResult test_fixed_pool(_Alloc& alloc, size_t _PoolSize, size_t _Ops, int _Seed)
+{
+    std::mt19937 rng(static_cast<unsigned int>(_Seed));
+    std::uniform_int_distribution<int> val_dist(0, 0x7FFFFFFF);
+    std::uniform_int_distribution<int> op_dist(0, 1); // 0=分配, 1=释放
+
+    std::vector<alloc_type*> live;
+    live.reserve(_PoolSize);
+
+    PoolStressResult r;
+    double peak = 0;
+
+    // 预热: 先把池子填满一半
+    for (size_t i = 0; i < _PoolSize / 2; i++)
+    {
+        alloc_type* p = alloc.alloc();
+        write_test_data(p, val_dist(rng));
+        live.push_back(p);
+    }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < _Ops; i++)
+    {
+        if (op_dist(rng) == 0 || live.empty())
+        {
+            // 分配
+            alloc_type* p = alloc.alloc();
+            write_test_data(p, val_dist(rng));
+            live.push_back(p);
+        }
+        else
+        {
+            // 随机释放一个
+            std::uniform_int_distribution<size_t> idx_dist(0, live.size() - 1);
+            size_t idx = idx_dist(rng);
+            alloc.free(live[idx]);
+            live[idx] = live.back();
+            live.pop_back();
+        }
+        double mem = get_process_memory_mb();
+        if (mem > peak) peak = mem;
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    // 清理
+    for (alloc_type* p : live)
+        alloc.free(p);
+
+    r.total_time = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.mem_peak   = peak;
+    r.count = 1;
+    return r;
+}
+
+// 场景4: 高复用模式 - 分配, 写, 释放, 再分配同一指针槽位
+template<class _Alloc>
+PoolStressResult test_high_reuse(_Alloc& alloc, size_t _Count, int _Seed)
+{
+    std::mt19937 rng(static_cast<unsigned int>(_Seed));
+    std::uniform_int_distribution<int> val_dist(0, 0x7FFFFFFF);
+
+    PoolStressResult r;
+    double peak = 0;
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for (size_t i = 0; i < _Count; i++)
+    {
+        alloc_type* p = alloc.alloc();
+        write_test_data(p, val_dist(rng));
+        volatile alloc_type x = *p; (void)x;
+        double mem = get_process_memory_mb();
+        if (mem > peak) peak = mem;
+        alloc.free(p);
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    r.total_time = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    r.alloc_time = r.total_time * 0.5;
+    r.free_time  = r.total_time * 0.5;
+    r.mem_peak   = peak;
+    r.count = 1;
+    return r;
+}
+
+inline void print_pool_result(const char* scenario, const char* name, const PoolStressResult& r)
+{
+    double c = static_cast<double>(r.count);
+    std::cout << "| " << std::left << std::setw(17) << scenario
+              << " | " << std::setw(12) << name
+              << " | " << std::right << std::setw(10) << std::fixed << std::setprecision(2) << r.total_time / c
+              << " | " << std::setw(10) << r.alloc_time / c
+              << " | " << std::setw(10) << r.free_time / c
+              << " | " << std::setw(10) << r.mem_peak / c << " |" << std::endl;
+}
+
+template<class _Alloc>
+void run_pool_stress(_Alloc& alloc, const char* name, size_t N, int baseSeed)
+{
+    constexpr int WARMUP = 2;
+    constexpr int ROUND  = 10;
+
+    PoolStressResult acc;
+
+    // 预热
+    for (int i = 0; i < WARMUP; i++)
+    {
+        PoolStressResult w;
+        w += test_alloc_free_pair(alloc, N, baseSeed + i);
+        w += test_batch_alloc_free(alloc, N, baseSeed + i);
+        w += test_fixed_pool(alloc, N / 10, N, baseSeed + i);
+        w += test_high_reuse(alloc, N, baseSeed + i);
+    }
+
+    // 正式测试
+    for (int i = 0; i < ROUND; i++)
+    {
+        acc += test_alloc_free_pair(alloc, N, baseSeed + i);
+    }
+    print_pool_result("配对 alloc+free", name, acc);
+    acc = PoolStressResult();
+
+    for (int i = 0; i < ROUND; i++)
+    {
+        acc += test_batch_alloc_free(alloc, N, baseSeed + i);
+    }
+    print_pool_result("批量 batch", name, acc);
+    acc = PoolStressResult();
+
+    for (int i = 0; i < ROUND; i++)
+    {
+        acc += test_fixed_pool(alloc, N / 10, N, baseSeed + i);
+    }
+    print_pool_result("固定池 随机", name, acc);
+    acc = PoolStressResult();
+
+    for (int i = 0; i < ROUND; i++)
+    {
+        acc += test_high_reuse(alloc, N, baseSeed + i);
+    }
+    print_pool_result("高复用 reuse", name, acc);
+    std::cout << "|-------------------|--------------|------------|------------|------------|------------|" << std::endl;
+}
+
 // ==================== 主测试 ====================
 
 int main()
 {
     constexpr size_t N = 1000000;
     constexpr int SEED = 12345;
-    constexpr int ROUND = 1;
+    constexpr int ROUND = 10;
 
     std::cout << "========== 内存分配器暴力测试 ==========" << std::endl;
     std::cout << "分配次数: " << N << " 次/轮, 测试 " << ROUND << " 轮取平均" << std::endl;
     std::cout << std::endl;
 
     std::cout << std::fixed << std::setprecision(2);
-    std::cout << "| Allocator    |   分配   | 随机读写 | 随机释放 |  再分配  | 随机读写2 | 释放所有 |   总计   | 分配前   | 释放前   | 释放后   |\n";
-    std::cout << "|--------------|----------|----------|----------|----------|-----------|----------|----------|----------|----------|----------|\n";
+    std::cout << "| Allocator    |   分配   | 随机读写 | 随机释放 |  再分配  | 随机读写2 | 释放所有 |   总计   | 分配前  | 释放前  | 释放后  |" << std::endl;
+
+    {
+        // 预热两轮
+        Allocator_MemoryPool a;
+        for (int i = 0; i < 2; i++)
+            stress_test(a, N, SEED + i);
+    }
+
+    std::cout << "|--------------|----------|----------|----------|----------|-----------|----------|----------|---------|---------|---------|" << std::endl;
 
     // --- MemoryPool ---
     {
         Allocator_MemoryPool a;
+        a.pool.init(0x1000000);
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
         print_result("MemoryPool", acc);
     }
 
+    //// --- HeapAlloc ---
+    //{
+    //    Allocator_HeapAlloc a;
+    //    StressTestResult acc;
+    //    for (int i = 0; i < ROUND; i++)
+    //        acc += stress_test(a, N, SEED + i);
+    //    print_result("HeapAlloc", acc);
+    //}
+
+    //// --- malloc ---
+    //{
+    //    Allocator_malloc a;
+    //    StressTestResult acc;
+    //    for (int i = 0; i < ROUND; i++)
+    //        acc += stress_test(a, N, SEED + i);
+    //    print_result("malloc", acc);
+    //}
+
+    //// --- new ---
+    //{
+    //    Allocator_new a;
+    //    StressTestResult acc;
+    //    for (int i = 0; i < ROUND; i++)
+    //        acc += stress_test(a, N, SEED + i);
+    //    print_result("new", acc);
+    //}
+
+    //// --- new[] ---
+    //{
+    //    Allocator_newArray a;
+    //    StressTestResult acc;
+    //    for (int i = 0; i < ROUND; i++)
+    //        acc += stress_test(a, N, SEED + i);
+    //    print_result("new[]", acc);
+    //}
+
+    //// --- mimalloc ---
+    //{
+    //    Allocator_mimalloc a;
+    //    StressTestResult acc;
+    //    for (int i = 0; i < ROUND; i++)
+    //        acc += stress_test(a, N, SEED + i);
+    //    print_result("mimalloc", acc);
+    //}
+
+    std::cout << "|--------------------------------------------------------------------------------------------------------------------------|" << std::endl;
+
+    std::cout << "\n========== 内存池固定尺寸持续分配/释放压力测试 ==========" << std::endl;
+    std::cout << "分配次数: " << N << " 次, 测试 " << ROUND << " 轮取平均, 预热 " << 2 << " 轮" << std::endl;
+    std::cout << std::endl;
+
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "|        场景       |    Allocator |     总耗时 |   分配耗时 |   释放耗时 |   峰值内存 |" << std::endl;
+    std::cout << "|-------------------|--------------|------------|------------|------------|------------|" << std::endl;
+
+    // --- MemoryPool ---
+    {
+        Allocator_MemoryPool a;
+        run_pool_stress(a, "MemoryPool", N, SEED);
+    }
+
     // --- HeapAlloc ---
     {
         Allocator_HeapAlloc a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("HeapAlloc", acc);
+        run_pool_stress(a, "HeapAlloc", N, SEED);
     }
 
     // --- malloc ---
     {
         Allocator_malloc a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("malloc", acc);
-    }
-
-    // --- VirtualAlloc ---
-    {
-        Allocator_VirtualAlloc a;
-        StressTestResult acc;
-        for (int i = 0; i < 1; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("VirtualAlloc", acc);
+        run_pool_stress(a, "malloc", N, SEED);
     }
 
     // --- new ---
     {
         Allocator_new a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("new", acc);
+        run_pool_stress(a, "new", N, SEED);
     }
 
-    // --- new[] ---
+    // --- mimalloc ---
     {
-        Allocator_newArray a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("new[]", acc);
+        Allocator_mimalloc a;
+        run_pool_stress(a, "mimalloc", N, SEED);
     }
 
-    std::cout << "|-----------------------------------------------------------------------------------------------------------------------------|" << std::endl;
- 
-    std::cout << "测试完成, 按回车退出..." << std::endl;
+    std::cout << "\n测试完成, 按回车退出..." << std::endl;
     std::cin.get();
 }
