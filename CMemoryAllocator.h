@@ -20,7 +20,6 @@
     #define _MEMPOOL_PLATFORM_OTHER 1
     #include <stdlib.h>
 #endif
-#include <mimalloc.h>
 
 NAMESPACE_MEMORYPOOL_BEGIN
 

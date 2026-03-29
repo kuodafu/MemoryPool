@@ -9,12 +9,30 @@
 #include <type_traits>
 #include <windows.h>
 #include <psapi.h>
-#include <mimalloc.h>
 #include "CMemoryObjectPool.h"
 
 using namespace kuodafu;
 
-using alloc_type = int;
+class CTest
+{
+    int a{};
+public:
+    CTest()
+    {
+
+    }
+    CTest(int a) : a(a)
+    {
+
+    }
+    ~CTest()
+    {
+        a = 0;
+    }
+protected:
+private:
+};
+using alloc_type = CTest;
 
 // 写入测试数据: 简单类型用随机值赋值, 结构体用 memset 随机字节
 inline void write_test_data(alloc_type* p, unsigned int seed)
@@ -86,13 +104,6 @@ struct Allocator_newArray
     const char* name() const { return "new[]"; }
 };
 
-// 7. mimalloc
-struct Allocator_mimalloc
-{
-    alloc_type* alloc() { return static_cast<alloc_type*>(mi_malloc(sizeof(alloc_type))); }
-    void free(alloc_type* p) { mi_free(p); }
-    const char* name() const { return "mimalloc"; }
-};
 
 // ==================== 测试框架 ====================
 
@@ -201,7 +212,7 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
         size_t idx = idx_dist(rng);
         alloc_type* p = live_ptrs[idx];
         write_test_data(p, val_dist(rng));
-        volatile alloc_type x = *p; (void)x;
+        volatile alloc_type& x = *p; (void)x;
     }
     auto t2 = std::chrono::high_resolution_clock::now();
 
@@ -234,7 +245,7 @@ StressTestResult stress_test(_Alloc& alloc, size_t _Count, int _Seed)
         size_t idx = idx_dist(rng);
         alloc_type* p = live_ptrs[idx];
         write_test_data(p, val_dist(rng));
-        volatile alloc_type x = *p; (void)x;
+        volatile alloc_type& x = *p; (void)x;
     }
     auto t5 = std::chrono::high_resolution_clock::now();
 
@@ -507,6 +518,11 @@ int main()
     {
         // 预热两轮
         Allocator_MemoryPool a;
+        for (int i = 0; i < N; i++)
+            a.pool.malloc(i);
+
+        a.pool.clear();
+
         for (int i = 0; i < 2; i++)
             stress_test(a, N, SEED + i);
     }
@@ -559,15 +575,6 @@ int main()
         print_result("new[]", acc);
     }
 
-    // --- mimalloc ---
-    {
-        Allocator_mimalloc a;
-        StressTestResult acc;
-        for (int i = 0; i < ROUND; i++)
-            acc += stress_test(a, N, SEED + i);
-        print_result("mimalloc", acc);
-    }
-
     std::cout << "|--------------------------------------------------------------------------------------------------------------------------|" << std::endl;
 
     std::cout << "\n========== 内存池固定尺寸持续分配/释放压力测试 ==========" << std::endl;
@@ -600,12 +607,6 @@ int main()
     {
         Allocator_new a;
         run_pool_stress(a, "new", N, SEED);
-    }
-
-    // --- mimalloc ---
-    {
-        Allocator_mimalloc a;
-        run_pool_stress(a, "mimalloc", N, SEED);
     }
 
     std::cout << "\n测试完成, 按回车退出..." << std::endl;

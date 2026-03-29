@@ -3,6 +3,7 @@
 #include <cassert>
 #include <type_traits>
 #include <new>
+#include <cstring>
 NAMESPACE_MEMORYPOOL_BEGIN
 
 // 定长内存池, 每次分配都是固定大小的内存
@@ -153,12 +154,15 @@ public:
 
     /**
      * @brief 释放所有内存
+     * @note 如果类型需要析构函数，则依次对每个内存块中已分配的所有对象调用析构函数，
+     *       然后释放内存回 OS。
      */
     inline void Release()
     {
         PMEMORY_HEAD node = _Mem;
         while (node)
         {
+            _destroy_block(node);
             PMEMORY_HEAD next = node->next;
             _Al.deallocate(reinterpret_cast<uint8_t*>(node), node->size);
             node = next;
@@ -169,8 +173,8 @@ public:
 
     /**
      * @brief 清空内存池
-     * @note 重置所有内存块到初始状态, 清空所有空闲链表
-     *       已分配出去的对象不受影响 (生命周期由调用者管理)
+     * @note 重置所有内存块到初始状态。如果类型需要析构函数，则依次对每个内存块中
+     *       已分配的所有对象调用析构函数，然后清空空闲链表，内存块可继续使用。
      */
     inline void clear()
     {
@@ -180,6 +184,7 @@ public:
         PMEMORY_HEAD pHead = _Mem;
         while (pHead)
         {
+            _destroy_block(pHead);
             pHead->item = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
             pHead->freeList = nullptr;
             pHead->freeCount = 0;
@@ -206,18 +211,40 @@ public:
     /**
      * @brief 查询地址是否属于本内存池
      * @param p 要查询的指针
-     * @return true 指针属于本内存池; false 指针不属于本内存池
+     * @return true 指针属于本内存池且对齐到槽位边界; false 指针不属于本内存池或未对齐
+     * @note debug 模式下会断言地址是否对齐到槽位边界
+     * @note 热点优先: 先检查当前块 _Now，大多数指针是最近分配的
      */
     inline bool query(pointer p) const
     {
-        PMEMORY_HEAD pHead = _Mem;
         byte_pointer ptr = reinterpret_cast<byte_pointer>(p);
+
+        // 热点优先: 先检查当前块
+        if (_Now)
+        {
+            byte_pointer pStart = reinterpret_cast<byte_pointer>(_Now) + sizeof(MEMORY_HEAD);
+            byte_pointer pEnd = reinterpret_cast<byte_pointer>(_Now) + _Now->size;
+            if (ptr >= pStart && ptr < pEnd)
+            {
+                assert((ptr - pStart) % SLOT_SIZE == 0 && "query address is not aligned to slot boundary");
+                return true;
+            }
+        }
+
+        // 不在当前块，遍历其他块
+        PMEMORY_HEAD pHead = _Mem;
         while (pHead)
         {
-            byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
-            byte_pointer pEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
-            if (ptr >= pStart && ptr < pEnd)
-                return true;
+            if (pHead != _Now)
+            {
+                byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+                byte_pointer pEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
+                if (ptr >= pStart && ptr < pEnd)
+                {
+                    assert((ptr - pStart) % SLOT_SIZE == 0 && "query address is not aligned to slot boundary");
+                    return true;
+                }
+            }
             pHead = pHead->next;
         }
         return false;
@@ -353,6 +380,98 @@ private:
     destroy(pointer p)
     {
         p->~_Ty();
+    }
+
+    //------------------------------------------------------------
+    // 销毁一块内存块内的所有已分配对象
+    //
+    // 实现: SFINAE 编译期分支
+    //   - trivially destructible: 空函数体，零开销
+    //   - 否则:
+    //       1. 计算 [pStart, item) 共有多少个槽位 N
+    //       2. 分配位图：小块用栈上缓冲区；大块优先借用本块末尾空闲空间；空间仍不够才动态 new
+    //       3. 遍历 free list，把对应 bit 置 1（表示已 free，不需析构）
+    //       4. 遍历 [pStart, item)，只对 bit = 0 的槽位调用析构函数
+    //------------------------------------------------------------
+    template<int _IsTriviallyDestructible = std::is_trivially_destructible<_Ty>::value>
+    inline typename std::enable_if<_IsTriviallyDestructible, void>::type
+    _destroy_block(PMEMORY_HEAD) {}
+
+    template<int _IsTriviallyDestructible = std::is_trivially_destructible<_Ty>::value>
+    inline typename std::enable_if<!_IsTriviallyDestructible, void>::type
+    _destroy_block(PMEMORY_HEAD pHead)
+    {
+        byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+        byte_pointer pEnd = pHead->item;
+
+        // 计算 [pStart, item) 区间共有多少个槽位
+        size_t totalSlots = static_cast<size_t>(pEnd - pStart) / SLOT_SIZE;
+        if (totalSlots == 0)
+            return;
+
+        // 如果回收链表是空的, 那就是start 到 item全部的槽位都要调用析构函数
+        if (!pHead->freeList)
+        {
+            for (byte_pointer p = pStart; p < pEnd; p += SLOT_SIZE)
+                destroy(reinterpret_cast<pointer>(p));
+            return;
+        }
+
+        size_t bitmapWords = (totalSlots + 31) >> 5;
+
+        // 栈上局部位图缓冲区，覆盖小块场景；大块借用本块末尾的空闲内存
+        static constexpr size_t STACK_BITMAP_SIZE = 0x1000;
+        uint32_t stackBitmap[STACK_BITMAP_SIZE];
+
+        // 小块用栈上缓冲区，大块借用本块末尾剩余空间（item 之后的区域）
+        uint32_t* bitmap = nullptr;
+        bool needFree = false;
+        size_t bitmapBytes = bitmapWords * sizeof(uint32_t);
+        if (bitmapWords <= STACK_BITMAP_SIZE)
+        {
+            bitmap = stackBitmap;
+        }
+        else
+        {
+            byte_pointer blockEnd = reinterpret_cast<byte_pointer>(pHead) + pHead->size;
+            byte_pointer freeStart = pEnd;
+            size_t freeBytes = static_cast<size_t>(blockEnd - freeStart);
+
+            if (freeBytes >= bitmapBytes)
+            {
+                // 块末尾有足够空闲空间，借用之
+                bitmap = reinterpret_cast<uint32_t*>(freeStart);
+            }
+            else
+            {
+                // 空间不够，动态分配
+                bitmap = new uint32_t[bitmapWords];
+                needFree = true;
+            }
+        }
+
+        std::memset(bitmap, 0, bitmapBytes);
+
+        // 遍历 free list，标记已释放的槽位
+        PLIST_NODE pNode = pHead->freeList;
+        while (pNode)
+        {
+            size_t idx = (reinterpret_cast<byte_pointer>(pNode) - pStart) / SLOT_SIZE;
+            bitmap[idx >> 5] |= 1U << (idx & 31);
+            pNode = pNode->next;
+        }
+
+        // 遍历所有槽位，对未标记的（活跃的）调用析构函数
+        for (size_t i = 0; i < totalSlots; ++i)
+        {
+            if ((bitmap[i >> 5] & (1U << (i & 31))) == 0)
+            {
+                destroy(reinterpret_cast<pointer>(pStart + i * SLOT_SIZE));
+            }
+        }
+
+        if (needFree)
+            delete[] bitmap;
     }
 
     //------------------------------------------------------------
