@@ -532,7 +532,7 @@ int main()
     // --- MemoryPool ---
     {
         Allocator_MemoryPool a;
-        a.pool.init(0x1000000);
+        //a.pool.init(0x1000000);
         StressTestResult acc;
         for (int i = 0; i < ROUND; i++)
             acc += stress_test(a, N, SEED + i);
