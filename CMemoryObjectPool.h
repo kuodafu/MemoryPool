@@ -34,7 +34,6 @@ private:
         size_t          size;       // 这一块内存占用的总字节 (已对齐到 0x1000)
         byte_pointer    item;       // 下一个要分配的地址
         PLIST_NODE      freeList;   // 本块的空闲链表头, nullptr 表示空
-        size_t          slotCount;  // 本块的总槽位数 (由实际分配的 size 计算得出)
         size_t          freeCount;  // 本块当前空闲节点数 (在空闲链表里的节点数)
     }*PMEMORY_HEAD;
 
@@ -364,7 +363,7 @@ private:
     //   2. 对齐修正: 计算 ptr 对应槽位的起始地址
     //   3. bump pop: 如果是最后分配的槽位 (pAligned + SLOT_SIZE == item), 直接回退 item
     //   4. 入链表: 链入本块的 free list 头部, freeCount++
-    //   5. 全块空闲判断: 已分配槽位数 + freeCount == 总槽位数, 整块重置到 bump 模式
+    //   5. 全块空闲判断: item 回到起点且 freeCount > 0 时，整块重置到 bump 模式
     //------------------------------------------------------------
     inline bool try_free_block(PMEMORY_HEAD pHead, byte_pointer ptr)
     {
@@ -390,20 +389,22 @@ private:
         }
 
         // 否则加入本块的 free list
-        auto pNode = reinterpret_cast<PLIST_NODE>(pAligned);
-        pNode->next = pHead->freeList;
-        pHead->freeList = pNode;
         pHead->freeCount++;
 
-        //// 如果整块都空闲了, 重置到 bump 模式
-        //// 已分配槽位数 + 空闲链表节点数 == 块的总槽位数, 说明块内所有槽位都空闲
-        //size_t liveSlots = static_cast<size_t>(pHead->item - pStart) / SLOT_SIZE;
-        //if (pHead->freeCount == pHead->slotCount - liveSlots)
-        //{
-        //    pHead->item = pStart;
-        //    pHead->freeList = nullptr;
-        //    pHead->freeCount = 0;
-        //}
+        // 如果整块都空闲了, 重置到 bump 模式
+        // 条件: 空闲槽位数 == 已分配的槽位数
+        size_t allocatedSlots = static_cast<size_t>(pHead->item - pStart) / SLOT_SIZE;
+        if (allocatedSlots == pHead->freeCount)
+        {
+            pHead->freeList = nullptr;
+            pHead->freeCount = 0;
+        }
+        else
+        {
+            auto pNode = reinterpret_cast<PLIST_NODE>(pAligned);
+            pNode->next = pHead->freeList;
+            pHead->freeList = pNode;
+        }
         return true;
     }
 
@@ -429,7 +430,6 @@ private:
         pHead->size = totalSize;
         pHead->item = pStart + sizeof(MEMORY_HEAD);
         pHead->freeList = nullptr;
-        pHead->slotCount = (totalSize - sizeof(MEMORY_HEAD)) / SLOT_SIZE;
         pHead->freeCount = 0;
         return pHead;
     }
