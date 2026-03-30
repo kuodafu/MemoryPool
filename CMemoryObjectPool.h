@@ -70,6 +70,21 @@ public:
         return CMemoryPoolBase<_Alloc>::free(p);
     }
 
+    /**
+     * @brief 将另一个池合并到本池
+     * @param other 要合并进来的池,合并后会被清空
+     * @exception std::runtime_error 传递进来的内存池非空时抛出
+     * @note 合并后会按照块的尺寸排序
+     */
+    void merge(CMemoryObjectPool& other)
+    {
+        if (!other.is_empty())
+            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
+        CMemoryPoolBase<_Alloc>::merge(other._Mem);
+        other._Now = nullptr;
+        other._mem = nullptr;
+    }
+
 protected:
     void _before_free(void* p) override
     {
@@ -80,12 +95,12 @@ protected:
     // 销毁块内所有已分配对象
     //
     // 实现: SFINAE 编译期分支
-    //   - trivially destructible: 空函数体，零开销
+    //   - trivially destructible: 空函数体,零开销
     //   - 否则:
     //       1. 计算 [pStart, item) 共有多少个槽位 N
-    //       2. 分配位图：小块用栈上缓冲区；大块优先借用本块末尾空闲空间；空间仍不够才动态 new
-    //       3. 遍历 free list，把对应 bit 置 1（表示已 free，不需析构）
-    //       4. 遍历 [pStart, item)，只对 bit = 0 的槽位调用析构函数
+    //       2. 分配位图:小块用栈上缓冲区;大块优先借用本块末尾空闲空间;空间仍不够才动态 new
+    //       3. 遍历 free list,把对应 bit 置 1(表示已 free,不需析构)
+    //       4. 遍历 [pStart, item),只对 bit = 0 的槽位调用析构函数
     //------------------------------------------------------------
     void _destroy_block(PMEMORY_HEAD pHead) override
     {
@@ -158,7 +173,7 @@ private:
 
         size_t bitmapWords = (totalSlots + 31) >> 5;
 
-        // 栈上局部位图缓冲区，覆盖小块场景；大块优先借用本块末尾空闲空间；空间仍不够才动态 new
+        // 栈上局部位图缓冲区,覆盖小块场景;大块优先借用本块末尾空闲空间;空间仍不够才动态 new
         static constexpr size_t STACK_BITMAP_SIZE = 0x800;
         uint32_t stackBitmap[STACK_BITMAP_SIZE];
 
@@ -188,7 +203,7 @@ private:
 
         std::memset(bitmap, 0, bitmapBytes);
 
-        // 遍历 free list，标记已释放的槽位
+        // 遍历 free list,标记已释放的槽位
         PLIST_NODE pNode = pHead->freeList;
         while (pNode)
         {
@@ -197,7 +212,7 @@ private:
             pNode = pNode->next;
         }
 
-        // 遍历所有槽位，对未标记的（活跃的）调用析构函数
+        // 遍历所有槽位,对未标记的(活跃的)调用析构函数
         for (size_t i = 0; i < totalSlots; ++i)
         {
             if ((bitmap[i >> 5] & (1U << (i & 31))) == 0)
@@ -213,7 +228,7 @@ private:
 };
 
 // 字节池, 每次分配固定字节数的内存
-// 槽位大小在运行时指定，已对齐到 sizeof(void*)
+// 槽位大小在运行时指定,已对齐到 sizeof(void*)
 template<class _Alloc>
 class CMemoryBytePool
     : public CMemoryPoolBase<_Alloc>
@@ -221,8 +236,8 @@ class CMemoryBytePool
 public:
     /**
      * @brief 构造字节池
-     * @param slotSize 每次分配的字节数，会对齐到 sizeof(void*)
-     * @param count 初始槽位数量，默认 4096
+     * @param slotSize 每次分配的字节数,会对齐到 sizeof(void*)
+     * @param count 初始槽位数量,默认 4096
      */
     explicit CMemoryBytePool(size_t slotSize = sizeof(void*), size_t count = 0x1000)
         : CMemoryPoolBase<_Alloc>(slotSize, count) {}
@@ -249,12 +264,28 @@ public:
 
     /**
      * @brief 重新设置槽位尺寸
-     * @param slotSize 新的槽位尺寸，已对齐到 sizeof(void*)
-     * @note 会销毁所有已有内存块，重置为空池
+     * @param slotSize 新的槽位尺寸,已对齐到 sizeof(void*)
+     * @exception std::runtime_error 如果池中仍有未释放的内存则抛出
+     * @note 调用前必须确保池为空(所有块 item 回到起始位置),可用 is_empty() 检查
      */
     void resize_slot(size_t slotSize)
     {
         CMemoryPoolBase<_Alloc>::resize_slot(slotSize);
+    }
+
+    /**
+     * @brief 将另一个池合并到本池
+     * @param other 要合并进来的池,合并后会被清空
+     * @exception std::runtime_error 传递进来的内存池非空时抛出
+     * @note 合并后会按照块的尺寸排序
+     */
+    void merge(CMemoryBytePool& other)
+    {
+        if (!other.is_empty())
+            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
+        CMemoryPoolBase<_Alloc>::merge(other._Mem);
+        other._Now = nullptr;
+        other._mem = nullptr;
     }
 
 };

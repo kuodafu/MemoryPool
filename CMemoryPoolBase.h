@@ -184,7 +184,7 @@ public:
 protected:
     //------------------------------------------------------------
     // 释放前的钩子, 由子类决定要不要析构对象
-    //   - CMemoryBytePool: 空实现（不需要析构）
+    //   - CMemoryBytePool: 空实现(不需要析构)
     //   - CMemoryObjectPool: 调用对象的析构函数
     //------------------------------------------------------------
     virtual void _before_free(void* p) {}
@@ -216,14 +216,91 @@ protected:
 
     //------------------------------------------------------------
     // 重新设置槽位尺寸
-    // @param slotSize 新的槽位尺寸，已对齐到 sizeof(void*)
-    // @note 会销毁所有已有内存块，重置为空池
+    // @param slotSize 新的槽位尺寸,已对齐到 sizeof(void*)
+    // @exception std::runtime_error 如果池中仍有未释放的内存则抛出
+    // @note 调用前必须确保池为空(所有块 item 回到起始位置)
     //------------------------------------------------------------
     inline void resize_slot(size_t slotSize)
     {
-        clear();
+        if (!is_empty())
+            throw std::runtime_error("resize_slot: 池中仍有未释放的内存,无法改变槽位尺寸");
         SLOT_SIZE = align_slot(slotSize);
     }
+
+    /**
+     * @brief 查询池是否为空(所有块均无分配)
+     * @return true 池为空,无任何已分配未释放的内存;false 池中仍有内存未释放
+     */
+    inline bool is_empty() const
+    {
+        PMEMORY_HEAD pHead = _Mem;
+        while (pHead)
+        {
+            byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+            if (pHead->item != pStart)
+                return false;
+            pHead = pHead->next;
+        }
+        return true;
+    }
+
+    /**
+     * @brief 合并实现:将 pHead 链表追加到本池,并按内存块尺寸从小到大排序
+     * @param pHead 对方池的内存块链表头
+     * @note 由子类的 merge() 调用,子类只负责转发
+     */
+    inline void merge(PMEMORY_HEAD pHead)
+    {
+        if (_Mem == nullptr)
+        {
+            _Mem = pHead;
+        }
+        else
+        {
+            // 找到本池末尾,接上对方链表
+            PMEMORY_HEAD pTail = _Mem;
+            while (pTail->next)
+                pTail = pTail->next;
+            pTail->next = pHead;
+        }
+        // 按内存块尺寸从小到大排序
+        _sort_by_size();
+        _Now = _Mem;
+    }
+
+    //------------------------------------------------------------
+    // 按内存块尺寸从小到大排序(插入排序)
+    //------------------------------------------------------------
+    inline void _sort_by_size()
+    {
+        if (!_Mem || !_Mem->next)
+            return;
+
+        PMEMORY_HEAD head = _Mem;
+        PMEMORY_HEAD sorted = nullptr;
+
+        while (head)
+        {
+            PMEMORY_HEAD next = head->next;
+
+            if (!sorted || head->size <= sorted->size)
+            {
+                head->next = sorted;
+                sorted = head;
+            }
+            else
+            {
+                PMEMORY_HEAD cur = sorted;
+                while (cur->next && cur->next->size < head->size)
+                    cur = cur->next;
+                head->next = cur->next;
+                cur->next = head;
+            }
+            head = next;
+        }
+        _Mem = sorted;
+    }
+
 
 public:
     /**
@@ -317,6 +394,7 @@ protected:
                 if (pBlockItem + SLOT_SIZE <= pBlockEnd)
                 {
                     pHead->item = pBlockItem + SLOT_SIZE;
+                    _Now = pHead;   // 下次分配从这个内存块里分配
                     return pBlockItem;
                 }
 
@@ -326,6 +404,7 @@ protected:
                     PLIST_NODE pNode = pHead->freeList;
                     pHead->freeList = pNode->next;
                     pHead->freeCount--;
+                    _Now = pHead;   // 下次分配从这个内存块里分配
                     return pNode;
                 }
             }
