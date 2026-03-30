@@ -61,15 +61,10 @@ public:
 
 };
 
-#if CMEMORYPOOL_ISDEBUG
-typedef kuodafu::CMemoryObjectPool::value_type value_type;
-static kuodafu::CMemoryObjectPool pool;
-static kuodafu::CMemoryPoolView pool_view;
-#else
+
 typedef size_t value_type;
 static kuodafu::CMemoryObjectPool<value_type, CAllocator> pool;
 static kuodafu::CMemoryPoolView<value_type, CAllocator> pool_view;
-#endif
 
 const int m_headSize = sizeof(kuodafu::MEMORY_HEAD);
 const int m_itemSize = sizeof(value_type);

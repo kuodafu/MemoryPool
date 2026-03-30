@@ -4,18 +4,12 @@ NAMESPACE_MEMORYPOOL_BEGIN
 
 
 
-#if CMEMORYPOOL_ISDEBUG
-class CMemoryPoolView;
-#else
+
 template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>;
-#endif
+class CMemoryPoolView;
 
 // 定长内存池, 每次分配都是固定大小的内存
-#if CMEMORYPOOL_ISDEBUG
-using _Ty = uint8_t;
-#else
 template<class _Ty = LPVOID, class _Alloc = std::allocator<BYTE>>
-#endif
 class CMemoryPool
 {
 public:
@@ -23,12 +17,7 @@ public:
     using pointer = _Ty*;
     using const_pointer = const _Ty*;
 private:
-#if CMEMORYPOOL_ISDEBUG
-    using _Alloc = std::allocator<uint8_t>;
-    friend class CMemoryPoolView;
-#else
     friend class CMemoryPoolView<value_type, _Alloc>;
-#endif
 
     using byte_pointer          = uint8_t*;  // 内部使用的指针, 递增值是1
     using const_byte_pointer    = const uint8_t*;
@@ -653,19 +642,11 @@ private:
 
 };
 //
-//#if CMEMORYPOOL_ISDEBUG
-//typedef int _Ty;
-//#else
 //template<class _Ty, class _Alloc>
-//#endif
 //class CMemoryPoolView
 //{
 //    using value_type = _Ty;
-//#if CMEMORYPOOL_ISDEBUG
-//    using MEMPOOL = CMemoryPool;
-//#else
 //    using MEMPOOL = CMemoryPool<value_type, _Alloc>;
-//#endif
 //    MEMPOOL* pool;
 //public:
 //

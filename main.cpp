@@ -51,7 +51,8 @@ struct Allocator_MemoryPool
 {
     //CMemoryObjectPool<alloc_type, std::allocator<uint8_t>> pool;
     CMemoryObjectPool<alloc_type, CMemoryPoolAllocator<uint8_t>> pool;
-    alloc_type* alloc() { return pool.malloc(); }
+    //CMemoryBytePool<CMemoryPoolAllocator<uint8_t>> pool;
+    alloc_type* alloc() { return (alloc_type*)pool.malloc(); }
     void free(alloc_type* p) { pool.free(p); }
     const char* name() const { return "MemoryPool"; }
 };
