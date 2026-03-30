@@ -210,14 +210,11 @@ private:
             CMemoryPoolBase<_Alloc>::_Al.deallocate(reinterpret_cast<byte_pointer>(bitmap), bitmapBytes);
     }
 
-
 };
-
-
 
 // 字节池, 每次分配固定字节数的内存
 // 槽位大小在运行时指定，已对齐到 sizeof(void*)
-template<class _Alloc = CMemoryPoolAllocator<uint8_t>>
+template<class _Alloc>
 class CMemoryBytePool
     : public CMemoryPoolBase<_Alloc>
 {
@@ -238,6 +235,26 @@ public:
     void* malloc()
     {
         return CMemoryPoolBase<_Alloc>::alloc();
+    }
+
+    /**
+     * @brief 释放一块内存
+     * @param p 要释放的指针
+     * @return true 释放成功; false 指针不属于本内存池
+     */
+    bool free(void* p)
+    {
+        return CMemoryPoolBase<_Alloc>::free(p);
+    }
+
+    /**
+     * @brief 重新设置槽位尺寸
+     * @param slotSize 新的槽位尺寸，已对齐到 sizeof(void*)
+     * @note 会销毁所有已有内存块，重置为空池
+     */
+    void resize_slot(size_t slotSize)
+    {
+        CMemoryPoolBase<_Alloc>::resize_slot(slotSize);
     }
 
 };

@@ -214,6 +214,17 @@ protected:
         _Al.deallocate(reinterpret_cast<byte_pointer>(pHead), pHead->size);
     }
 
+    //------------------------------------------------------------
+    // 重新设置槽位尺寸
+    // @param slotSize 新的槽位尺寸，已对齐到 sizeof(void*)
+    // @note 会销毁所有已有内存块，重置为空池
+    //------------------------------------------------------------
+    inline void resize_slot(size_t slotSize)
+    {
+        clear();
+        SLOT_SIZE = align_slot(slotSize);
+    }
+
 public:
     /**
      * @brief 获取内存池占用的总字节数
