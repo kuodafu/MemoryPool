@@ -5,6 +5,11 @@
 #include <new>
 #include <cstring>
 
+// 定义合并/分离操作后是否按内存块尺寸排序: 0 = 不排序, 1 = 排序
+#ifndef MEMORYPOOL_SORT_AFTER_MERGE_SPLIT
+#define MEMORYPOOL_SORT_AFTER_MERGE_SPLIT 0
+#endif
+
 NAMESPACE_MEMORYPOOL_BEGIN
 
 template<class _Alloc = CMemoryPoolAllocator<uint8_t>>
@@ -227,47 +232,111 @@ protected:
         SLOT_SIZE = align_slot(slotSize);
     }
 
-    /**
-     * @brief 查询池是否为空(所有块均无分配)
-     * @return true 池为空,无任何已分配未释放的内存;false 池中仍有内存未释放
-     */
-    inline bool is_empty() const
+    inline void _swap(CMemoryPoolBase& other)
     {
-        PMEMORY_HEAD pHead = _Mem;
-        while (pHead)
-        {
-            byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
-            if (pHead->item != pStart)
-                return false;
-            pHead = pHead->next;
-        }
-        return true;
+        std::swap(_Mem, other._Mem);
+        std::swap(_Now, other._Now);
+        std::swap(SLOT_SIZE, other.SLOT_SIZE);
     }
 
     /**
-     * @brief 合并实现:将 pHead 链表追加到本池,并按内存块尺寸从小到大排序
-     * @param pHead 对方池的内存块链表头
+     * @brief 合并实现:将目标池的所有块转移到本池,并按内存块尺寸排序
+     * @param other 对方池,合并后会被清空
      * @note 由子类的 merge() 调用,子类只负责转发
      */
-    inline void merge(PMEMORY_HEAD pHead)
+    inline void merge(CMemoryPoolBase& other)
     {
+        if (!other.is_empty())
+            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
+
+        PMEMORY_HEAD pHead = other._Mem;
+        other._Mem = nullptr;
+        other._Now = nullptr;
+
+        if (_Mem == nullptr)
+        {
+            _Mem = pHead;
+            _Now = _Mem;
+        }
+        else
+        {
+            PMEMORY_HEAD pTail = _Mem;
+            while (pTail->next)
+                pTail = pTail->next;
+            pTail->next = pHead;
+        }
+#if MEMORYPOOL_SORT_AFTER_MERGE_SPLIT
+        _sort_by_size();
+#endif
+    }
+
+    /**
+     * @brief 分离实现:将本池中所有空闲块转移到目标池
+     * @param target 目标内存池,接收分离出来的空闲块
+     * @return 分离出去的空闲块数量
+     * @note 空闲块的判断标准: item 回到块起始位置 (bump pointer 已完全回退)
+     *       分离后本池剩余块会保持原有顺序,目标池按尺寸排序
+     */
+    inline size_t split(CMemoryPoolBase& target)
+    {
+        if (!_Mem)
+            return 0;
+        if (&target == this)
+            return 0;
+
+        size_t count = 0;
+        PMEMORY_HEAD pHead = _Mem;
+        byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+
+        // 跳过开头连续的空闲块
+        while (pHead && pHead->item == pStart)
+        {
+            PMEMORY_HEAD next = pHead->next;
+            pHead->next = nullptr;
+            ++count;
+            pHead = next;
+            if (pHead)
+                pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+        }
+
+        if (count > 0)
+        {
+            // 将分离出的空闲块链表追加到目标池
+            target._append_blocks(_Mem);
+            // 更新本池头部
+            _Mem = pHead;
+            _Now = _Mem ? _Mem : nullptr;
+        }
+        return count;
+    }
+
+    /**
+     * @brief 将 pHead 链表追加到本池,并按内存块尺寸从小到大排序
+     * @param pHead 要追加的链表头
+     * @note 内部使用,不检查兼容性,由调用方保证
+     */
+    inline void _append_blocks(PMEMORY_HEAD pHead)
+    {
+        if (pHead == nullptr)
+            return;
         if (_Mem == nullptr)
         {
             _Mem = pHead;
         }
         else
         {
-            // 找到本池末尾,接上对方链表
             PMEMORY_HEAD pTail = _Mem;
             while (pTail->next)
                 pTail = pTail->next;
             pTail->next = pHead;
         }
-        // 按内存块尺寸从小到大排序
+#if MEMORYPOOL_SORT_AFTER_MERGE_SPLIT
         _sort_by_size();
+#endif
         _Now = _Mem;
     }
 
+#if MEMORYPOOL_SORT_AFTER_MERGE_SPLIT
     //------------------------------------------------------------
     // 按内存块尺寸从小到大排序(插入排序)
     //------------------------------------------------------------
@@ -300,6 +369,7 @@ protected:
         }
         _Mem = sorted;
     }
+#endif
 
 
 public:
@@ -318,6 +388,34 @@ public:
         }
         return total;
     }
+
+
+    /**
+     * @brief 获取内存池当前每次分配的字节数
+     * @return 返回每次分配的字节数, 会向上对齐到 sizeof(void*)
+     */
+    inline size_t get_slot() const noexcept
+    {
+        return SLOT_SIZE;
+    }
+
+    /**
+     * @brief 查询池是否为空(所有块均无分配)
+     * @return true 池为空,无任何已分配未释放的内存;false 池中仍有内存未释放
+     */
+    inline bool is_empty() const
+    {
+        PMEMORY_HEAD pHead = _Mem;
+        while (pHead)
+        {
+            byte_pointer pStart = reinterpret_cast<byte_pointer>(pHead) + sizeof(MEMORY_HEAD);
+            if (pHead->item != pStart)
+                return false;
+            pHead = pHead->next;
+        }
+        return true;
+    }
+
 
     /**
      * @brief 输出调试状态

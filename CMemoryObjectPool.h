@@ -19,10 +19,10 @@ public:
     using const_pointer = const _Ty*;
 
 private:
-    using CMemoryPoolBase<_Alloc>::MEMORY_HEAD;
-    using CMemoryPoolBase<_Alloc>::PMEMORY_HEAD;
-    using CMemoryPoolBase<_Alloc>::PLIST_NODE;
-    using CMemoryPoolBase<_Alloc>::byte_pointer;
+    using typename CMemoryPoolBase<_Alloc>::MEMORY_HEAD;
+    using typename CMemoryPoolBase<_Alloc>::PMEMORY_HEAD;
+    using typename CMemoryPoolBase<_Alloc>::PLIST_NODE;
+    using typename CMemoryPoolBase<_Alloc>::byte_pointer;
 
 public:
     /**
@@ -78,11 +78,31 @@ public:
      */
     void merge(CMemoryObjectPool& other)
     {
-        if (!other.is_empty())
-            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
-        CMemoryPoolBase<_Alloc>::merge(other._Mem);
-        other._Now = nullptr;
-        other._mem = nullptr;
+        CMemoryPoolBase<_Alloc>::merge(other);
+    }
+
+    /**
+     * @brief 将本池中所有空闲块分离到目标池
+     * @param target 目标内存池,接收分离出来的空闲块
+     * @return 分离出去的空闲块数量
+     * @note 空闲块的判断标准: item 回到块起始位置 (bump pointer 已完全回退)
+     *       分离后本池剩余块会保持原有顺序,目标池按尺寸排序
+     */
+    size_t split(CMemoryObjectPool& target)
+    {
+        return CMemoryPoolBase<_Alloc>::split(target);
+    }
+
+    /**
+     * @brief 与另一个池交换所有内存块
+     * @param other 要交换的池, 类型必须与本池一致
+     * @exception std::runtime_error 传递进来的内存池是自身时抛出
+     */
+    void swap(CMemoryObjectPool& other)
+    {
+        if (&other == this)
+            throw std::runtime_error("swap: 不能与自身交换");
+        CMemoryPoolBase<_Alloc>::_swap(other);
     }
 
 protected:
@@ -229,7 +249,7 @@ private:
 
 // 字节池, 每次分配固定字节数的内存
 // 槽位大小在运行时指定,已对齐到 sizeof(void*)
-template<class _Alloc>
+template<class _Alloc = CMemoryPoolAllocator<uint8_t>>
 class CMemoryBytePool
     : public CMemoryPoolBase<_Alloc>
 {
@@ -273,6 +293,7 @@ public:
         CMemoryPoolBase<_Alloc>::resize_slot(slotSize);
     }
 
+
     /**
      * @brief 将另一个池合并到本池
      * @param other 要合并进来的池,合并后会被清空
@@ -281,11 +302,31 @@ public:
      */
     void merge(CMemoryBytePool& other)
     {
-        if (!other.is_empty())
-            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
-        CMemoryPoolBase<_Alloc>::merge(other._Mem);
-        other._Now = nullptr;
-        other._mem = nullptr;
+        CMemoryPoolBase<_Alloc>::merge(other);
+    }
+
+    /**
+     * @brief 将本池中所有空闲块分离到目标池
+     * @param target 目标内存池,接收分离出来的空闲块
+     * @return 分离出去的空闲块数量
+     * @note 空闲块的判断标准: item 回到块起始位置 (bump pointer 已完全回退)
+     *       分离后本池剩余块会保持原有顺序,目标池按尺寸排序
+     */
+    size_t split(CMemoryBytePool& target)
+    {
+        return CMemoryPoolBase<_Alloc>::split(target);
+    }
+
+    /**
+     * @brief 与另一个池交换所有内存块
+     * @param other 要交换的池, 类型必须与本池一致
+     * @exception std::runtime_error 传递进来的内存池是自身时抛出
+     */
+    void swap(CMemoryBytePool& other)
+    {
+        if (&other == this)
+            throw std::runtime_error("swap: 不能与自身交换");
+        CMemoryPoolBase<_Alloc>::_swap(other);
     }
 
 };
