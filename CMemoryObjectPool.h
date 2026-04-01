@@ -1,9 +1,6 @@
 ﻿#pragma once
 #include "CMemoryPoolBase.h"
-#include <cassert>
-#include <type_traits>
-#include <new>
-#include <cstring>
+
 NAMESPACE_MEMORYPOOL_BEGIN
 
 
@@ -73,7 +70,7 @@ public:
     /**
      * @brief 将另一个池合并到本池
      * @param other 要合并进来的池,合并后会被清空
-     * @exception std::runtime_error 传递进来的内存池非空时抛出
+     * @exception std::exception 传递进来的内存池非空时抛出
      * @note 合并后会按照块的尺寸排序
      */
     void merge(CMemoryObjectPool& other)
@@ -96,12 +93,12 @@ public:
     /**
      * @brief 与另一个池交换所有内存块
      * @param other 要交换的池, 类型必须与本池一致
-     * @exception std::runtime_error 传递进来的内存池是自身时抛出
+     * @exception std::exception 传递进来的内存池是自身时抛出
      */
     void swap(CMemoryObjectPool& other)
     {
         if (&other == this)
-            throw std::runtime_error("swap: 不能与自身交换");
+            throw std::exception("swap: 不能与自身交换");
         CMemoryPoolBase<_Alloc>::_swap(other);
     }
 
@@ -285,7 +282,7 @@ public:
     /**
      * @brief 重新设置槽位尺寸
      * @param slotSize 新的槽位尺寸,已对齐到 sizeof(void*)
-     * @exception std::runtime_error 如果池中仍有未释放的内存则抛出
+     * @exception std::exception 如果池中仍有未释放的内存则抛出
      * @note 调用前必须确保池为空(所有块 item 回到起始位置),可用 is_empty() 检查
      */
     void resize_slot(size_t slotSize)
@@ -297,7 +294,7 @@ public:
     /**
      * @brief 将另一个池合并到本池
      * @param other 要合并进来的池,合并后会被清空
-     * @exception std::runtime_error 传递进来的内存池非空时抛出
+     * @exception std::exception 传递进来的内存池非空时抛出
      * @note 合并后会按照块的尺寸排序
      */
     void merge(CMemoryBytePool& other)
@@ -320,12 +317,12 @@ public:
     /**
      * @brief 与另一个池交换所有内存块
      * @param other 要交换的池, 类型必须与本池一致
-     * @exception std::runtime_error 传递进来的内存池是自身时抛出
+     * @exception std::exception 传递进来的内存池是自身时抛出
      */
     void swap(CMemoryBytePool& other)
     {
         if (&other == this)
-            throw std::runtime_error("swap: 不能与自身交换");
+            throw std::exception("swap: 不能与自身交换");
         CMemoryPoolBase<_Alloc>::_swap(other);
     }
 

@@ -222,13 +222,13 @@ protected:
     //------------------------------------------------------------
     // 重新设置槽位尺寸
     // @param slotSize 新的槽位尺寸,已对齐到 sizeof(void*)
-    // @exception std::runtime_error 如果池中仍有未释放的内存则抛出
+    // @exception std::exception 如果池中仍有未释放的内存则抛出
     // @note 调用前必须确保池为空(所有块 item 回到起始位置)
     //------------------------------------------------------------
     inline void resize_slot(size_t slotSize)
     {
         if (!is_empty())
-            throw std::runtime_error("resize_slot: 池中仍有未释放的内存,无法改变槽位尺寸");
+            throw std::exception("resize_slot: 池中仍有未释放的内存,无法改变槽位尺寸");
         SLOT_SIZE = align_slot(slotSize);
     }
 
@@ -247,7 +247,7 @@ protected:
     inline void merge(CMemoryPoolBase& other)
     {
         if (!other.is_empty())
-            throw std::runtime_error("merge: 传递进来的内存池非空,无法合并");
+            throw std::exception("merge: 传递进来的内存池非空,无法合并");
 
         PMEMORY_HEAD pHead = other._Mem;
         other._Mem = nullptr;
