@@ -58,10 +58,10 @@ inline size_t memory_pool_system_page_size() noexcept
         return static_cast<size_t>(information.dwPageSize);
 #else
         const long queried = ::sysconf(_SC_PAGESIZE);
-        return queried > 0 ? static_cast<size_t>(queried) : 0;
+        return queried > 0 ? static_cast<size_t>(queried) : 0x1000;
 #endif
     }();
-    return pageSize;
+    return pageSize > 0 && pageSize < 65536 ? pageSize : 0x1000;
 }
 
 /**
